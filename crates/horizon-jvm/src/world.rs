@@ -161,7 +161,11 @@ pub(crate) fn set_block(
                 if c.len() <= self.0 {
                     return Vec::new();
                 }
-                let mine = c.split_off(self.0).into_iter().flatten().collect::<Vec<_>>();
+                let mine = c
+                    .split_off(self.0)
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
                 // The write around this one (a cascade that called Java) sees these too.
                 if let Some(outer) = c.last_mut() {
                     outer.extend_from_slice(&mine);
@@ -451,9 +455,10 @@ mod tests {
 
     #[test]
     fn a_write_reports_every_change_its_cascade_made_in_order() {
-        let written =
-            with_blocks_mut(&mut Torch, || set_block("minecraft:overworld", 1, 64, 2, "x", 3))
-                .unwrap();
+        let written = with_blocks_mut(&mut Torch, || {
+            set_block("minecraft:overworld", 1, 64, 2, "x", 3)
+        })
+        .unwrap();
         // The inner write's change joins the outer one's, after what the outer made before it:
         // read in order, the last change at a position is what stands there.
         assert_eq!(
@@ -463,11 +468,20 @@ mod tests {
         assert_eq!(written.flat()[..2], [1, 3]);
         // Another dimension, or no view at all: queued, nothing noted.
         assert!(
-            with_blocks_mut(&mut Torch, || set_block("minecraft:the_nether", 0, 0, 0, "x", 3))
-                .is_none()
+            with_blocks_mut(&mut Torch, || set_block(
+                "minecraft:the_nether",
+                0,
+                0,
+                0,
+                "x",
+                3
+            ))
+            .is_none()
         );
         // A read-only view, or none at all: queued.
-        assert!(with_blocks(&Torch, || set_block("minecraft:overworld", 0, 0, 0, "x", 3)).is_none());
+        assert!(
+            with_blocks(&Torch, || set_block("minecraft:overworld", 0, 0, 0, "x", 3)).is_none()
+        );
         assert!(set_block("minecraft:overworld", 0, 0, 0, "x", 3).is_none());
         note_change(0, 0, 0, 1);
         assert!(CHANGES.with_borrow(Vec::is_empty));

@@ -109,14 +109,15 @@ impl Game<'_> {
         }
         let keys: Vec<(i32, i32)> = chunks.iter().map(|c| (c.x, c.z)).collect();
         let dim = self.dim.id();
-        let tags =
-            match self.with_java_world_read(|| horizon_jvm::events::chunk_block_entities(dim, &keys)) {
-                Ok(tags) => tags,
-                Err(e) => {
-                    log::warn!("Java mods: saving block entities: {e}");
-                    return;
-                }
-            };
+        let tags = match self
+            .with_java_world_read(|| horizon_jvm::events::chunk_block_entities(dim, &keys))
+        {
+            Ok(tags) => tags,
+            Err(e) => {
+                log::warn!("Java mods: saving block entities: {e}");
+                return;
+            }
+        };
         for snbt in tags {
             let tag = match horizon_world::nbt::parse_snbt(&snbt) {
                 Ok((tag, _)) => tag,

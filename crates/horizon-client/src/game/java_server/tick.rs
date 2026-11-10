@@ -502,12 +502,11 @@ impl Game<'_> {
             }
             // The tick's start only: its level parts run inside Horizon's level ticks
             // (java_server/phases.rs), its end after them (java_tick_end).
-            let ticked = horizon_jvm::events::phased(true)
+            horizon_jvm::events::phased(true)
                 .and_then(|()| horizon_jvm::events::game_time(game_time, seed, running))
                 .and_then(|()| {
                     horizon_jvm::events::server_tick(ticks, dedicated, &root, &players, &events)
-                });
-            ticked
+                })
         });
         match ticked {
             Ok(()) => self.mods.java.tick_started = true,
