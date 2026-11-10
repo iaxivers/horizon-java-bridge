@@ -654,6 +654,15 @@ impl Game<'_> {
             return self.java_block_entity_data(p);
         };
         let mut tag = save::block_entity_data(key, e, &name, self.world.block_lock(key));
+        // HopperBlockEntity.saveAdditional writes its cooldown, which Horizon keeps beside it.
+        if save::text(tag.get("id")).as_deref() == Some("minecraft:hopper")
+            && let Tag::Compound(map) = &mut tag
+        {
+            map.insert(
+                "TransferCooldown".into(),
+                Tag::Int(self.hopper_cooldown(key)),
+            );
+        }
         if let (Some(custom), Tag::Compound(map)) = (self.world.block_names.get(&key), &mut tag) {
             map.entry("CustomName".into())
                 .or_insert_with(|| Tag::String(custom.as_str().into()));

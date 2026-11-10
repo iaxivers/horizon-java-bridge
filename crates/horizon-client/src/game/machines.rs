@@ -525,6 +525,11 @@ pub(super) fn shelf_signal(
 }
 
 impl Game<'_> {
+    /// `HopperBlockEntity.cooldownTime` at `pos` as it saves it (`TransferCooldown`): -1 for
+    /// a hopper that hasn't ticked (its field's start).
+    pub(super) fn hopper_cooldown(&self, pos: Pos) -> i32 {
+        self.hoppers.get(&pos).map_or(-1, |h| h.cooldown)
+    }
     fn containers(&self) -> Containers<'_> {
         Containers {
             world: &self.world,
