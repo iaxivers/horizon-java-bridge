@@ -217,8 +217,9 @@ without client code (`HORIZON_JAVA_SIDE=server`), closer to what a Fabric server
 **The scenario** (console commands through a FIFO, identical on both; built at y 200 in the air,
 force-loaded):
 
-1. Start: launch to ready. Horizon's "Done" comes *before* its Java side on a warm start (the
-   mods' content cached), so its side also waits for the mods' start hooks; the table shows both.
+1. Start: launch to ready. Horizon's side also waits for the mirror's start hooks (its first
+   tick, just after "Done"; before `bridge-benchfix` "Done" came ~14 s before the Java side on a
+   warm start); the table shows both.
 2. Frozen (`/tick freeze`): 48 vanilla hopper lines (chest → 8 hoppers → chest), 24 Create chute
    lines (chest → hopper → 4 chutes → chest), 16 Create kinetic lines (creative motor + 8 shafts).
 3. **Parity:** `/tick step 200`, then every container's items and every kinetic block's speed
@@ -279,6 +280,30 @@ the server thread). Memory: with the headless client Horizon is +0.4–0.8 GB; w
 Fabric. The headless client is what makes mods' screens and HUDs work for players; it is the
 first place to look for memory and tick time (see "Where the server tick goes" above).
 
+After `bridge-benchfix` (2accec5cbe, the same cloud machine and scenario; Fabric API 0.165.0 +
+Create Fly 6.0.9 unofficial 3, 60 s of items, 60 s exploring; the headless client on):
+
+| | Real Fabric | Horizon + bridge |
+|---|---|---|
+| Start, launch to ready (s; its own "Done") | 23.5 (4.1) | 39.6 (39.3; cold: content made) |
+| Restart, launch to ready (s; its own "Done") | 19.8 (2.9) | 24.0 (23.2: "Done" waits for Java now) |
+| MSPT avg / P50 / P95 / P99, items running | 0.7 / 0.6 / 0.9 / 11.3 | 3.0 / 2.7 / 4.3 / 65.1 |
+| MSPT avg / P50 / P95 / P99, exploring | 13.4 / 12.7 / 23.8 / 436.0 | 18.1 / 16.3 / 38.6 / 65.5 |
+| RSS items / exploring (MB) | 743 / 909 | 1428 / 1594 |
+| Peak RSS (MB) | 1094 | 1836 |
+| Java heap used / committed, exploring (MB) | 442 / 662 | 670 / 700 |
+| Chunks the bot got exploring | 1151 | 2036 |
+| Parity diffs (200 ticks, 792 block entities) | — | **0** (was 32) |
+| NBT key differences (`/data` keys) | — | **0** (was 424: hoppers' `TransferCooldown`) |
+| Moved while frozen | 0 | 0 |
+| Save check (restart) | OK | **OK** (was 24 lines lost an item) |
+| Cross-open in real Fabric | — | **OK** (was 312 problems) |
+
+Regression run (`regress.py`, the Create, Farmer's Delight and server cases, same machine): all
+pass but `createclick` (its station isn't bound: fails on 53113a2eaa too, here) and `createfan`,
+whose 0.8-block push in 6 s is noisy on these 2 cores (base: 1.69 / 0.65 / 1.09; this branch:
+0.37 / 0.18 / 0.67 / 1.12 / 0.89). Worth a look on a desktop.
+
 ### What it found (bugs)
 
 Fixed in this branch:
@@ -292,26 +317,26 @@ Fixed in this branch:
    only looked in its own world; it now asks the mirror (`HorizonServer.blockEntityData`:
    the live one's `saveWithFullMetadata`, or the saved one not made yet).
 
-Open (the harness shows them; each needs its own fix):
+Fixed in `bridge-benchfix` (each shows as 0 in the harness now):
 
-3. **Items lost on a warm restart.** Horizon's dedicated server prints "Done" and ticks the world
-   ~14 s before its Java side is up when the mods' content is cached. In that window a vanilla
-   hopper facing a mod block (a Create chute) pushes one item into it and the item is gone: one
-   copper ingot lost in each of the 24 chute lines; the hopper then stops and fills up (32 items).
-   Fix: hold the world's ticks (or at least transfers into mods' blocks) until the Java side is
-   up, as joins already are.
-4. **Mods' block entities aren't in the region files** (`horizon-java/block_entities/*.nbt`
-   only). Real Fabric opening Horizon's world finds Create's blocks with fresh block entities:
-   kinetic networks and speeds lost (`Network`, `Source`, `Speed` 16 → 0), the items inside
-   chutes lost (each line 4 items short: the 3 in its chutes, and bug 3's; a mod's chest or
-   machine would lose everything it holds). Fix:
-   write the mods' block entities into their chunks' `block_entities` too.
-5. **Create chutes one tick off in some chunks.** After 200 stepped ticks, the 16 chute lines in
-   chunks z = 6 and 8 have one item still in the last chute where Fabric has it in the chest
-   (22 vs 23); the 8 lines in chunk z = 7, every hopper line and every kinetic line match exactly.
-   Probably the order in which the mirror makes or first ticks those block entities.
-6. Minor: Horizon's `/data get block` on a hopper leaves out `TransferCooldown` (vanilla always
-   writes it; Horizon's region files have it).
+3. **Items lost on a warm restart.** Horizon's dedicated server printed "Done" and ticked the
+   world ~14 s before its Java side was up when the mods' content was cached; a vanilla hopper
+   facing a Create chute pushed one item into Horizon's own handling of the content block and it
+   was gone (one copper ingot in each of the 24 chute lines). Now a server's levels don't tick
+   until the Java mods' start has ended (`tick_server` runs paused: the network still answers),
+   and a dedicated server says "Done" after it, as a Fabric server loads its mods first.
+4. **Mods' block entities weren't in the region files** (`horizon-java/block_entities/*.nbt`
+   only): real Fabric opening Horizon's world lost Create's kinetic networks and speeds and the
+   items in chutes (312 problems). They are saved in their chunks' `block_entities` now, as
+   vanilla saves them, and read back from there; an older world's side folder is read once and
+   moves into the chunks as they save (checked: a bench world turned back into the old layout
+   opens with all 240 mod block entities, the folder is gone after `save-all`, and real Fabric
+   then opens it with nothing lost).
+5. **Create chutes one tick off in some chunks** (22 vs 23 in the sink chest in chunks z = 6
+   and 8): the mirror ticked mods' block entities in hash order by position; vanilla ticks them
+   in the order they were made (`Level.blockEntityTickers`). A `LinkedHashMap` now.
+6. `/data get block` on a hopper has `TransferCooldown` (its cooldown, -1 before it ticks):
+   the NBT key differences between the sides went from 424 to 0.
 
 ### Traps
 

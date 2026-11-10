@@ -18,7 +18,7 @@ saying something works.
 | Boot | `java/dev/horizonlab/bridge/Boot.java`, `fabric/FabricBoot.java` (Knot, entrypoints, headless client boot), `Natives.java` (Java→Rust) |
 | Server mirror | `java/platform/.../HorizonServer.java`: set-up (`setUp`, `level`), the tick (`tick`: players, events, hooks, menus, block entities, frames), menus shown in Horizon's window (`syncMenus`, `SHOWN`), payloads (`payload`), `syncInventories` (end of every call) |
 | Horizon's items for mods' blocks | `HorizonItems.java` (shadows, block callbacks, held items, changes back); Rust `java_server/items.rs` (`java_items_json`, `java_items_changed`, `JAVA_HELD_ITEMS`, hoppers) |
-| Mod block entities | `HorizonBlockEntities.java`: `LIVE` (mods' own, ticked, saved in `horizon-java/block_entities/`), `COPIES` (Horizon's vanilla ones as lasting copies, refreshed each tick, written back on change), Fabric load/unload events |
+| Mod block entities | `HorizonBlockEntities.java`: `LIVE` (mods' own, ticked in the order they were made, saved in their chunks' `block_entities`: `chunkData`, `chunkLoaded`, `changedChunks`; Rust `java_server/saves.rs`; the old `horizon-java/block_entities/` read once as `LEGACY`), `COPIES` (Horizon's vanilla ones as lasting copies, refreshed each tick, written back on change), Fabric load/unload events |
 | Ticks, light, data, hooks | `HorizonTicks.java`, `HorizonLight.java`, `HorizonData.java` (data packs, recipes), `HorizonHooks.java` (mods' injections fired by name), `HorizonMixinTable.java` (every patch of every kind, where it runs, which actions go to the mirror), `HorizonTickets.java` (mods' chunk tickets → Horizon's kept chunks), `HorizonChunkLoads.java` (chunks loaded through vanilla's chunk system: pregenerators) |
 | Headless client | `HorizonClient.java`: an allocated `Minecraft` (options, font, gui, window, language with mods' translations, sound/text-input managers, game mode), a `LocalPlayer` per player, screens (`openScreen`, client menus, `frame`, `input`, `tickScreen`), client-only screens (`setScreen` via `GuiMixin`, `CLIENT_ONLY`), the client half of item use (`useItem`), the client's tick (`clientTick`), `/modconfig`, `as(player, …)` swaps `minecraft.player` and `gui.screen` |
 | Screen drawing | `HorizonGraphics.java` records `GuiGraphicsExtractor` calls as JSON ops (blit, sprite, fill, gradient, text, item, decorations, tooltips, pose, `typing`) |
@@ -1365,8 +1365,24 @@ Generic fixes found with Create Fly; regress `createpump`, `createfan` (scenes `
 - **Real Fabric's server refuses clients without Fabric API** once mods add registry entries
   (registry sync): a protocol bot needs `horizon-bots --fabric` (registers
   `fabric:registry/sync`, answers `fabric:registry/sync/complete`).
-- **Horizon's dedicated "Done" comes before the Java side on a warm start** (the mods' content
-  cached): wait for `[java] Java mods: the server's start hooks ... ran` before testing mods.
+- **A server's levels wait for the Java mods' start** (`java_holds_server`: `tick_server` runs
+  paused until it ends) and a dedicated server's "Done" comes after it (bridge-benchfix). Before,
+  a warm start (the mods' content cached) ticked ~14 s without the mods: a hopper facing a Create
+  chute pushed an item into Horizon's own handling of the content block and it was gone. The
+  mirror's start hooks still run at its first tick: wait for `[java] Java mods: the server's
+  start hooks ... ran` before testing mods.
+- **Mods' block entities live in their chunks' `block_entities`**, as vanilla's do (real Fabric
+  reads them there; the side folder it doesn't know lost Create's kinetic networks and chute
+  items). Horizon's save batch asks the mirror (`with_entities` → `java_save_block_entities`:
+  the mirror's data wins over a copy Horizon's world still holds); the mirror's `setChanged`
+  marks the chunk modified (`changedChunks`, asked before each save and unload); a loaded
+  chunk's mod block entities (Horizon decodes them as `BlockEntity::Mod`) are made in the mirror
+  at the level's next tick (`chunkLoaded`), and any the mods ask for first are taken from
+  Horizon's world (`Natives.blockEntity`); `Natives.setBlockEntity(…, "")` lets go of them.
+  Their first `HorizonServer.world()` doesn't clear what was made before it.
+- **The mirror ticks mods' block entities in the order they were made** (a `LinkedHashMap`, as
+  `Level.blockEntityTickers`): a `HashMap` by position ticked Create's chutes of a line out of
+  order in some chunks only, one item a line behind real Fabric after 200 ticks.
 - **`SyncedBlockEntity.sendData` goes through `ServerChunkCache.blockChanged`**, not
   `ServerLevel.sendBlockUpdated`: a client copy has to treat both as the update packet. And a
   client copy loaded with plain `loadWithComponents` reads with `clientPacket=false`; mods do
@@ -2067,6 +2083,15 @@ Naturalist (mobs with ModelPart models, Fabric API only). The repo's own critter
 
 ## Status
 
+Bench fixes (2026-11-10, `bridge-benchfix`): mods' block entities are saved in their chunks
+(real Fabric opening Horizon's world keeps Create's networks and chute items: 312 problems → 0;
+an older world's `horizon-java/block_entities/` moves into its chunks as they save, checked with a
+bench world turned back into the old layout); servers don't tick and the
+dedicated server doesn't say "Done" before the Java mods are up (no item lost into a chute on a
+warm restart); mods' block entities tick in the order they were made (chute parity 32 diffs →
+0); `/data get block` on a hopper has `TransferCooldown`. See java-bridge-perf.md "Bridge vs
+real Fabric".
+
 Bridge vs real Fabric (2026-11-10, `bridge-bench`): `tools/java_bridge/bench_vs_fabric.py` runs the
 same mods, seed and scripted scenario (hopper, Create chute and kinetic lines; a bot exploring)
 on a real Fabric 26.3 server and Horizon's `--dedicated`, and reports MSPT, RSS, heap, start
@@ -2075,7 +2100,7 @@ save. See [java-bridge-perf.md](java-bridge-perf.md) "Bridge vs real Fabric". Fi
 freeze` now stops the mods' block entities, ticks, entities and spawner; `/data get block` reads
 mods' block entities. Open (found by it): a warm start ticks ~14 s before the Java side is up
 (hoppers lose an item into mods' blocks), mods' block entities aren't in the region files (real
-Fabric loses their data), Create chutes one tick off in some chunks.
+Fabric loses their data), Create chutes one tick off in some chunks: all fixed in `bridge-benchfix`.
 
 Create's pumps, pipes and fans (2026-11-06, `bridge-create-1`): a pump fills a tank from
 Horizon's water and the tank shows it (client copies load the update packets as a client does),
