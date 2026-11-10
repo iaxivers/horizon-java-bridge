@@ -155,6 +155,11 @@ public final class HorizonBlockEntities {
      * line: Horizon saves them again.
      */
     public static synchronized String changedChunks() {
+        // An older world's side folder: their chunks are saved with them (once each is loaded;
+        // Horizon marks only loaded chunks), then the folder has none of them left.
+        for (ServerLevel level : HorizonServer.levels()) {
+            for (long key : legacy(level).keySet()) mark(level, BlockPos.of(key));
+        }
         if (DIRTY.isEmpty()) return "";
         StringBuilder out = new StringBuilder();
         for (Map.Entry<String, java.util.Set<Long>> e : DIRTY.entrySet()) {
@@ -220,6 +225,7 @@ public final class HorizonBlockEntities {
         BlockEntity be = peek(level, pos);
         if (be != null) return be.saveWithFullMetadata(level.registryAccess());
         CompoundTag saved = saved(level).get(pos.asLong());
+        if (saved == null) saved = legacy(level).get(pos.asLong());
         return saved == null ? null : saved.copy();
     }
 
@@ -415,6 +421,14 @@ public final class HorizonBlockEntities {
                 }
             }
         }
+    }
+
+    /**
+     * A server tick of a frozen world (`/tick freeze`): nothing ticks, but saved ones whose
+     * chunks came still come up, as a loaded chunk's do.
+     */
+    public static synchronized void frozenTick() {
+        if (++ticks % 20 == 0) restore();
     }
 
     /** Each server tick: the tickers run; gone blocks drop, unloaded ones are put away. */

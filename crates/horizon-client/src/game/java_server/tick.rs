@@ -197,6 +197,10 @@ impl Game<'_> {
     /// The tick's end: joins and leaves, the tick's events, then the mods' tick.
     pub(in crate::game) fn tick_java_server(&mut self) {
         super::super::java_profile::tick();
+        // Mod block entities their chunks brought: the mods make them (a frozen world's too).
+        if java_mods_on() && horizon_jvm::events::ready() {
+            self.java_take_loaded_block_entities();
+        }
         self.send_java_commands();
         let owner = self.lan.as_ref().and_then(|h| h.hub.singleplayer_owner);
         self.java_device_own_player(owner);

@@ -28,8 +28,8 @@ impl Game<'_> {
         self.java_mark_block_entity_chunks();
     }
 
-    /// Hands the level in place's waiting mod block entities to the mods' side (at its tick,
-    /// once Fabric runs).
+    /// Hands the level in place's waiting mod block entities to the mods' side (at the start
+    /// of its tick, frozen or not, once Fabric runs).
     pub(super) fn java_take_loaded_block_entities(&mut self) {
         let dim = self.dim.id();
         let positions: Vec<[i32; 3]> = {

@@ -1774,6 +1774,7 @@ public final class HorizonServer {
         HorizonItems.touchBlocks();
         playerMotionsBefore();
         if (running) HorizonBlockEntities.tick();
+        else HorizonBlockEntities.frozenTick();
         playerMotionsAfter();
         phase = HorizonProfile.add("block entities", phase);
         HorizonChunkLoads.tick();
