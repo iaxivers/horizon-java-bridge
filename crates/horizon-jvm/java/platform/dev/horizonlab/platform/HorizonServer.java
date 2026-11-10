@@ -3258,6 +3258,39 @@ public final class HorizonServer {
         return out[0];
     }
 
+    /**
+     * Horizon saves these chunks of {@code dimension} ({@code chunks}: x, z pairs): the mods'
+     * block entities in them, as their chunk's {@code block_entities} hold them (SNBT).
+     */
+    public static String[] chunkBlockEntities(String dimension, int[] chunks) {
+        Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
+        if (server == null) return new String[0];
+        String[][] out = {new String[0]};
+        fire("chunk block entities", () -> out[0] = HorizonBlockEntities.chunkData(level(dimension), chunks));
+        return out[0];
+    }
+
+    /**
+     * Mods' block entities Horizon's world loaded with their chunks at {@code positions} (x, y,
+     * z triples) of {@code dimension}: made now (LevelChunk.registerAllBlockEntitiesAfterLevelLoad).
+     */
+    public static void chunkBlockEntitiesLoaded(String dimension, int[] positions) {
+        Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
+        if (server == null) return;
+        ServerLevel level = level(dimension);
+        for (int i = 0; i + 2 < positions.length; i += 3) {
+            BlockPos pos = new BlockPos(positions[i], positions[i + 1], positions[i + 2]);
+            fire("BlockEntity (loaded)", () -> HorizonBlockEntities.chunkLoaded(level, pos));
+        }
+    }
+
+    /** The chunks whose mods' block entities changed since last asked ("dimension x z" lines). */
+    public static String changedBlockEntityChunks() {
+        Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
+        if (server == null) return "";
+        return HorizonBlockEntities.changedChunks();
+    }
+
     public static String hopperExtract(String dimension, int x, int y, int z, int face, boolean anyRoom, String[] partial) {
         Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
         if (server == null) return null;

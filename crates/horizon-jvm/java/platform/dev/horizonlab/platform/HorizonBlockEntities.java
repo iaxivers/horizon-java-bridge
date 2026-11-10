@@ -25,22 +25,31 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /**
  * Mod blocks' block entities (a cooking pot's inventory): Horizon has none for blocks it only
- * knows from a content mod, so they are Java's, made when a mod first asks for one, ticked with
- * the server and saved beside the world ({@code horizon-java/block_entities/}). A block entity
- * whose chunk Horizon unloaded is put away, not dropped; one whose block is gone drops what it
- * holds, as the mod's own block would have.
+ * knows from a content mod, so they are Java's, made when a mod first asks for one (or their
+ * chunk loads), ticked with the server in the order they were made (vanilla's
+ * {@code Level.blockEntityTickers}), and saved where vanilla saves them: in their chunk's
+ * {@code block_entities} (Horizon asks {@link #chunkData} as it saves a chunk, and a loaded
+ * chunk's are read back through Horizon's world, {@code Natives.blockEntity}). Worlds saved
+ * before kept them beside the world ({@code horizon-java/block_entities/}): read once, they move
+ * into their chunks as those are saved. A block entity whose chunk Horizon unloaded is put
+ * away, not dropped; one whose block is gone drops what it holds, as the mod's own block would.
  */
 public final class HorizonBlockEntities {
     private HorizonBlockEntities() {}
 
-    /** Every 10 s, the changed ones are saved. */
-    private static final int SAVE_TICKS = 200;
-
+    /** By level, in the order they were made: the order they tick in. */
     private static final Map<ServerLevel, Map<Long, BlockEntity>> LIVE = new IdentityHashMap<>();
-    /** Saved ones not made yet, per dimension. */
+    /** Put away (their chunk unloaded) and not made again yet, per dimension. */
     private static final Map<String, Map<Long, CompoundTag>> SAVED = new HashMap<>();
+    /**
+     * Read from the side folder older worlds kept them in, per dimension, not in a chunk yet:
+     * written back there (what is left) until their chunks have them.
+     */
+    private static final Map<String, Map<Long, CompoundTag>> LEGACY = new HashMap<>();
+    /** Chunks whose mod block entities changed (LevelChunk.markUnsaved), per dimension. */
+    private static final Map<String, java.util.Set<Long>> DIRTY = new HashMap<>();
     private static Path dir;
-    private static boolean dirty;
+    private static boolean legacyChanged;
     private static int ticks;
 
     /** A mod's block (Horizon has its own block entities for vanilla's). */
@@ -52,17 +61,23 @@ public final class HorizonBlockEntities {
     static synchronized void world(Path worldDir) {
         Path now = worldDir == null ? null : worldDir.resolve("horizon-java").resolve("block_entities");
         if (now == null || now.equals(dir)) return;
-        if (dir != null) save();
-        LIVE.clear();
-        SAVED.clear();
-        COPIES.clear();
-        HorizonClientBlockEntities.clear();
+        // The first world's folder comes with the mods' first tick: what its loaded chunks
+        // brought before (made from Horizon's world, which let go of them) is this world's.
+        if (dir != null) {
+            save();
+            LIVE.clear();
+            SAVED.clear();
+            DIRTY.clear();
+            COPIES.clear();
+            HorizonClientBlockEntities.clear();
+        }
+        LEGACY.clear();
         dir = now;
     }
 
     /** Level.getBlockEntity on a mirrored level. */
     public static synchronized BlockEntity get(Level level, BlockPos pos) {
-        Map<Long, BlockEntity> live = LIVE.computeIfAbsent((ServerLevel) level, l -> new HashMap<>());
+        Map<Long, BlockEntity> live = liveMap((ServerLevel) level);
         long key = pos.asLong();
         BlockEntity be = live.get(key);
         BlockState state = HorizonServer.blockState(level, pos);
@@ -80,10 +95,18 @@ public final class HorizonBlockEntities {
         }
         if (be != null) remove(level, live, key, be, false);
         CompoundTag saved = saved(level).remove(key);
+        if (saved == null) {
+            saved = legacy(level).remove(key);
+            if (saved != null) legacyChanged = true;
+        }
+        // Read with its chunk (the chunk's block_entities): Horizon's world holds it until
+        // the mods' side takes it, and lets go of it then.
+        if (saved == null) saved = fromChunk(level, pos);
         BlockEntity made = null;
         if (saved != null) {
             try {
                 made = BlockEntity.loadStatic(pos.immutable(), state, saved, level.registryAccess());
+                if (made != null && !made.getType().isValid(state)) made = null;
             } catch (Throwable t) {
                 Natives.log("Java mods: a block entity at " + pos + " could not be read: " + t);
             }
@@ -92,9 +115,101 @@ public final class HorizonBlockEntities {
         if (made == null) return null;
         made.setLevel(level);
         live.put(key, made);
-        dirty = true;
+        mark(level, pos);
         loaded(level, made);
         return made;
+    }
+
+    private static Map<Long, BlockEntity> liveMap(ServerLevel level) {
+        return LIVE.computeIfAbsent(level, l -> new java.util.LinkedHashMap<>());
+    }
+
+    /**
+     * The mod block entity Horizon's world holds at {@code pos} (read with its chunk, a mod's
+     * id), taken: Horizon's world lets go of it (Natives.setBlockEntity with ""). Null when none.
+     */
+    private static CompoundTag fromChunk(Level level, BlockPos pos) {
+        String dimension = level.dimension().identifier().toString();
+        String snbt = Natives.blockEntity(dimension, pos.getX(), pos.getY(), pos.getZ());
+        if (snbt == null) return null;
+        try {
+            CompoundTag tag = net.minecraft.nbt.TagParser.parseCompoundFully(snbt);
+            String id = tag.getStringOr("id", "");
+            if (id.isEmpty() || id.startsWith("minecraft:")) return null;
+            Natives.setBlockEntity(dimension, pos.getX(), pos.getY(), pos.getZ(), "");
+            return tag;
+        } catch (Throwable t) {
+            Natives.log("Java mods: the block entity at " + pos + " in its chunk could not be read: " + t);
+            return null;
+        }
+    }
+
+    /** The chunk of {@code pos} has to be saved again (LevelChunk.markUnsaved). */
+    private static void mark(Level level, BlockPos pos) {
+        DIRTY.computeIfAbsent(level.dimension().identifier().toString(), d -> new java.util.HashSet<>())
+                .add(net.minecraft.world.level.ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4));
+    }
+
+    /**
+     * The chunks whose mod block entities changed since last asked, each "dimension x z" on a
+     * line: Horizon saves them again.
+     */
+    public static synchronized String changedChunks() {
+        if (DIRTY.isEmpty()) return "";
+        StringBuilder out = new StringBuilder();
+        for (Map.Entry<String, java.util.Set<Long>> e : DIRTY.entrySet()) {
+            for (long chunk : e.getValue()) {
+                out.append(e.getKey()).append(' ').append(net.minecraft.world.level.ChunkPos.getX(chunk))
+                        .append(' ').append(net.minecraft.world.level.ChunkPos.getZ(chunk)).append('\n');
+            }
+        }
+        DIRTY.clear();
+        return out.toString();
+    }
+
+    /**
+     * The mod block entities of these chunks ({@code chunks}: x, z pairs) as their chunks save
+     * them (BlockEntity.saveWithFullMetadata, SNBT): the live ones, those put away, and those
+     * an older world kept beside it (they move into the chunk now).
+     */
+    public static synchronized String[] chunkData(ServerLevel level, int[] chunks) {
+        java.util.Set<Long> wanted = new java.util.HashSet<>();
+        for (int i = 0; i + 1 < chunks.length; i += 2) {
+            wanted.add(net.minecraft.world.level.ChunkPos.pack(chunks[i], chunks[i + 1]));
+        }
+        java.util.List<String> out = new ArrayList<>();
+        java.util.Set<Long> done = new java.util.HashSet<>();
+        Map<Long, BlockEntity> live = LIVE.get(level);
+        if (live != null) {
+            for (Map.Entry<Long, BlockEntity> e : live.entrySet()) {
+                BlockPos pos = BlockPos.of(e.getKey());
+                if (!wanted.contains(net.minecraft.world.level.ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4))) continue;
+                try {
+                    out.add(e.getValue().saveWithFullMetadata(level.registryAccess()).toString());
+                    done.add(e.getKey());
+                } catch (Throwable t) {
+                    Natives.log("Java mods: a block entity at " + pos + " could not be saved: " + t);
+                }
+            }
+        }
+        for (Map<Long, CompoundTag> kept : java.util.List.of(saved(level), legacy(level))) {
+            for (Map.Entry<Long, CompoundTag> e : kept.entrySet()) {
+                BlockPos pos = BlockPos.of(e.getKey());
+                if (!wanted.contains(net.minecraft.world.level.ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4))) continue;
+                if (done.add(e.getKey())) out.add(e.getValue().toString());
+            }
+        }
+        // An older world's: in its chunk from now on (kept in memory until it is made).
+        Map<Long, CompoundTag> legacy = legacy(level);
+        for (java.util.Iterator<Map.Entry<Long, CompoundTag>> it = legacy.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<Long, CompoundTag> e = it.next();
+            BlockPos pos = BlockPos.of(e.getKey());
+            if (!wanted.contains(net.minecraft.world.level.ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4))) continue;
+            saved(level).putIfAbsent(e.getKey(), e.getValue());
+            it.remove();
+            legacyChanged = true;
+        }
+        return out.toArray(new String[0]);
     }
 
     /**
@@ -129,16 +244,36 @@ public final class HorizonBlockEntities {
     }
 
     /**
+     * Mod block entities their chunks brought (Horizon's world holds them as it loaded them):
+     * made now, so they tick from their chunk's load, as vanilla's do. What isn't a mod's block
+     * with a block entity is left to Horizon.
+     */
+    public static synchronized void chunkLoaded(Level level, BlockPos pos) {
+        BlockState state = HorizonServer.blockState(level, pos);
+        if (!modded(state) || !(state.getBlock() instanceof EntityBlock)) return;
+        Map<Long, BlockEntity> live = LIVE.get((ServerLevel) level);
+        if (live != null && live.containsKey(pos.asLong())) {
+            // Up already (its chunk came back before the mods saw it go): the live one is
+            // newer than what its chunk was last saved with; Horizon's copy goes.
+            String dimension = level.dimension().identifier().toString();
+            Natives.setBlockEntity(dimension, pos.getX(), pos.getY(), pos.getZ(), "");
+            return;
+        }
+        get(level, pos);
+    }
+
+    /**
      * Saved block entities whose chunks Horizon has loaded come back up, so they tick (a mod
      * machine works on with no one looking at it), as a loaded chunk's do.
      */
     private static void restore() {
         for (ServerLevel level : HorizonServer.levels()) {
             String dimension = level.dimension().identifier().toString();
-            Map<Long, CompoundTag> saved = saved(level);
-            for (Long key : new ArrayList<>(saved.keySet())) {
-                BlockPos pos = BlockPos.of(key);
-                if (Natives.blockState(dimension, pos.getX(), pos.getY(), pos.getZ()) != null) get(level, pos);
+            for (Map<Long, CompoundTag> kept : java.util.List.of(saved(level), legacy(level))) {
+                for (Long key : new ArrayList<>(kept.keySet())) {
+                    BlockPos pos = BlockPos.of(key);
+                    if (Natives.blockState(dimension, pos.getX(), pos.getY(), pos.getZ()) != null) get(level, pos);
+                }
             }
         }
     }
@@ -146,11 +281,11 @@ public final class HorizonBlockEntities {
     /** Level.setBlockEntity on a mirrored level. */
     public static synchronized void put(Level level, BlockEntity be) {
         if (!modded(be.getBlockState())) return;
-        Map<Long, BlockEntity> live = LIVE.computeIfAbsent((ServerLevel) level, l -> new HashMap<>());
+        Map<Long, BlockEntity> live = liveMap((ServerLevel) level);
         BlockEntity old = live.put(be.getBlockPos().asLong(), be);
         if (old != null && old != be) old.setRemoved();
         be.setLevel(level);
-        dirty = true;
+        mark(level, be.getBlockPos());
     }
 
     /** Level.removeBlockEntity on a mirrored level: the mod's own removal, nothing dropped. */
@@ -162,12 +297,13 @@ public final class HorizonBlockEntities {
             unloaded(level, be);
         }
         saved(level).remove(pos.asLong());
-        dirty = true;
+        if (legacy(level).remove(pos.asLong()) != null) legacyChanged = true;
+        mark(level, pos);
     }
 
     /** Level.blockEntityChanged (BlockEntity.setChanged). */
     public static synchronized void changed(Level level, BlockPos pos) {
-        dirty = true;
+        mark(level, pos);
         HorizonClientBlockEntities.changed((ServerLevel) level, pos);
         Map<Long, Copy> copies = COPIES.get((ServerLevel) level);
         Copy copy = copies == null ? null : copies.get(pos.asLong());
@@ -309,8 +445,7 @@ public final class HorizonBlockEntities {
                 tick(level, pos, state, be);
             }
         }
-        if (++ticks % SAVE_TICKS == 0 && dirty) save();
-        if (ticks % 20 == 0) restore();
+        if (++ticks % 20 == 0) restore();
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -332,7 +467,7 @@ public final class HorizonBlockEntities {
         }
         be.setRemoved();
         unloaded(level, be);
-        dirty = true;
+        mark(level, be.getBlockPos());
     }
 
     /**
@@ -361,7 +496,12 @@ public final class HorizonBlockEntities {
 
     private static Map<Long, CompoundTag> saved(Level level) {
         String dimension = level.dimension().identifier().toString();
-        return SAVED.computeIfAbsent(dimension, HorizonBlockEntities::read);
+        return SAVED.computeIfAbsent(dimension, d -> new HashMap<>());
+    }
+
+    private static Map<Long, CompoundTag> legacy(Level level) {
+        String dimension = level.dimension().identifier().toString();
+        return LEGACY.computeIfAbsent(dimension, HorizonBlockEntities::read);
     }
 
     private static Path file(String dimension) {
@@ -386,35 +526,31 @@ public final class HorizonBlockEntities {
         return out;
     }
 
-    /** Writes every dimension's block entities: the live ones and those put away. */
+    /**
+     * What is left of an older world's side folder is written back (their chunks have the rest);
+     * the folder goes once it is empty. Block entities are saved with their chunks.
+     */
     public static synchronized void save() {
-        if (dir == null) return;
-        Map<String, ListTag> lists = new HashMap<>();
-        for (Map.Entry<String, Map<Long, CompoundTag>> e : SAVED.entrySet()) {
-            ListTag list = lists.computeIfAbsent(e.getKey(), d -> new ListTag());
-            for (CompoundTag tag : e.getValue().values()) list.add(tag);
-        }
-        for (Map.Entry<ServerLevel, Map<Long, BlockEntity>> e : LIVE.entrySet()) {
-            ServerLevel level = e.getKey();
-            ListTag list = lists.computeIfAbsent(level.dimension().identifier().toString(), d -> new ListTag());
-            for (BlockEntity be : e.getValue().values()) {
-                try {
-                    list.add(be.saveWithFullMetadata(level.registryAccess()));
-                } catch (Throwable t) {
-                    Natives.log("Java mods: a block entity at " + be.getBlockPos() + " could not be saved: " + t);
-                }
-            }
-        }
+        if (dir == null || !legacyChanged) return;
         try {
-            Files.createDirectories(dir);
-            for (Map.Entry<String, ListTag> e : lists.entrySet()) {
+            for (Map.Entry<String, Map<Long, CompoundTag>> e : LEGACY.entrySet()) {
+                Path file = file(e.getKey());
+                if (e.getValue().isEmpty()) {
+                    Files.deleteIfExists(file);
+                    continue;
+                }
+                ListTag list = new ListTag();
+                for (CompoundTag tag : e.getValue().values()) list.add(tag);
                 CompoundTag root = new CompoundTag();
-                root.put("block_entities", (Tag) e.getValue());
-                NbtIo.writeCompressed(root, file(e.getKey()));
+                root.put("block_entities", (Tag) list);
+                NbtIo.writeCompressed(root, file);
             }
-            dirty = false;
+            try (var left = Files.list(dir)) {
+                if (left.findAny().isEmpty()) Files.delete(dir);
+            }
+            legacyChanged = false;
         } catch (Throwable t) {
-            Natives.log("Java mods: block entities could not be saved in " + dir + ": " + t);
+            Natives.log("Java mods: " + dir + " could not be written: " + t);
         }
     }
 }

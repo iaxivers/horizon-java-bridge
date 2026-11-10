@@ -127,7 +127,6 @@ pub(in crate::game) fn start_early() {
 /// Starts the JVM and Fabric on the "Java mods" thread, once a process: from [`start_early`]
 /// once the content root is there, else from `start_java_mods`.
 fn spawn_start(dir: PathBuf, jars: Vec<PathBuf>) {
-    static SPAWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if SPAWNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
@@ -405,6 +404,9 @@ fn share_vulkan_instance() {
     let _ = horizon_jvm::gpu::SHARED_INSTANCE.set(horizon_client::gfx::own_instance);
 }
 
+/// Set once Java's start is under way (its thread spawned).
+static SPAWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Set once Java's start has ended, whether it started or not.
 static SETTLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -415,6 +417,14 @@ pub(in crate::game) fn wait_for_java(limit: std::time::Duration) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     horizon_jvm::events::ready()
+}
+
+/// Whether the Java mods' start is still pending: a server doesn't tick its levels until it
+/// ends (a vanilla server loads its mods before its first tick; a hopper pushing into a mod's
+/// block before the mods are up lost the item: bridge-benchfix).
+pub(in crate::game) fn java_starting() -> bool {
+    SPAWNED.load(std::sync::atomic::Ordering::SeqCst)
+        && !SETTLED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Whether the Java mods' start is still pending, or their data-pack load functions haven't

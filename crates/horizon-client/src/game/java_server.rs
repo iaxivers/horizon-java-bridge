@@ -105,6 +105,8 @@ mod menus;
 #[cfg(feature = "java-mods")]
 mod players;
 #[cfg(feature = "java-mods")]
+mod saves;
+#[cfg(feature = "java-mods")]
 mod tick;
 #[cfg(feature = "java-mods")]
 pub(super) use self::{blocks::java_block_set, tick::JavaServerState};

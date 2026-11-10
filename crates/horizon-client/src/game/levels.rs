@@ -453,8 +453,11 @@ impl Game<'_> {
         // (each `ServerLevel.tick` only reads `runsNormally`), and the native
         // `ServerTickStart` before that level work, where NeoForge fires
         // `ServerTickEvent.Pre`. A paused pass and a held server tick nothing.
-        let running = (!paused && !self.agent.hold_server).then(|| self.clock.world_runs());
         let server = self.serving.is_some() || self.options.dedicated.is_some();
+        // A server's levels wait for the Java mods' start (java_mods/bridge.rs): its network
+        // still runs, as a paused server's does.
+        let paused = paused || (server && Self::java_holds_server());
+        let running = (!paused && !self.agent.hold_server).then(|| self.clock.world_runs());
         // A config edited while the server is paused (empty) still reloads.
         if server {
             self.native_configs_poll();

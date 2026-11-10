@@ -35,6 +35,22 @@ impl Game<'_> {
         false
     }
     pub(in crate::game) fn java_random_ticks(&mut self) {}
+    /// Chunks came: the mods' block entities they hold go to the mods.
+    pub(in crate::game) fn java_chunks_loaded(&mut self, _loaded: &[(i32, i32, bool)]) {}
+    /// The chunks whose mods' block entities changed are marked to be saved.
+    pub(in crate::game) fn java_mark_block_entity_chunks(&mut self) {}
+    /// A save batch: the mods' block entities go into their chunks.
+    pub(in crate::game) fn java_save_block_entities(
+        &self,
+        _chunks: &mut [horizon_client::chunk::Chunk],
+    ) {
+    }
+    /// Whether the server waits for the Java mods' start before it ticks: none to wait for.
+    pub(in crate::game) fn java_holds_server() -> bool {
+        false
+    }
+    /// A dedicated server's start waits for the Java mods' start: none to wait for.
+    pub(in crate::game) fn java_wait_for_start() {}
     /// `/data get block` on a mod's block entity: its NBT.
     pub(in crate::game) fn java_block_entity_data(
         &self,

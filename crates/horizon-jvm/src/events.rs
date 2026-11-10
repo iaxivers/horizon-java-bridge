@@ -1659,6 +1659,76 @@ pub fn block_entities(
     Ok(())
 }
 
+/// Horizon saves `chunks` of `dimension`: the Java mods' block entities in them, as SNBT, for
+/// the chunks' `block_entities` (`HorizonBlockEntities.chunkData`).
+pub fn chunk_block_entities(dimension: &str, chunks: &[(i32, i32)]) -> Result<Vec<String>, String> {
+    let flat: Vec<i32> = chunks.iter().flat_map(|&(x, z)| [x, z]).collect();
+    let tags = with_server(|env, class| {
+        let dimension = env.new_string(dimension)?;
+        let array = env.new_int_array(flat.len() as sys::jsize)?;
+        env.set_int_array_region(&array, 0, &flat)?;
+        let out = env
+            .call_static_method(
+                class,
+                "chunkBlockEntities",
+                "(Ljava/lang/String;[I)[Ljava/lang/String;",
+                &[JValue::Object(&dimension), JValue::Object(&array)],
+            )?
+            .l()?;
+        string_array(env, out)
+    })?;
+    Ok(tags.unwrap_or_default())
+}
+
+/// Mod block entities Horizon's world loaded with their chunks at `positions` of `dimension`:
+/// the mods' side takes them and makes them (`HorizonBlockEntities.chunkLoaded`).
+pub fn chunk_block_entities_loaded(dimension: &str, positions: &[[i32; 3]]) -> Result<(), String> {
+    let flat: Vec<i32> = positions.iter().flatten().copied().collect();
+    with_server(|env, class| {
+        let dimension = env.new_string(dimension)?;
+        let array = env.new_int_array(flat.len() as sys::jsize)?;
+        env.set_int_array_region(&array, 0, &flat)?;
+        env.call_static_method(
+            class,
+            "chunkBlockEntitiesLoaded",
+            "(Ljava/lang/String;[I)V",
+            &[JValue::Object(&dimension), JValue::Object(&array)],
+        )?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// The chunks whose Java mods' block entities changed since last asked, by dimension: Horizon
+/// saves them again (`LevelChunk.markUnsaved`).
+pub fn changed_block_entity_chunks() -> Result<Vec<(String, i32, i32)>, String> {
+    let text = with_server(|env, class| {
+        let out = env
+            .call_static_method(
+                class,
+                "changedBlockEntityChunks",
+                "()Ljava/lang/String;",
+                &[],
+            )?
+            .l()?;
+        if out.is_null() {
+            return Ok(String::new());
+        }
+        Ok(String::from(env.get_string(&JString::from(out))?))
+    })?;
+    Ok(text
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split(' ');
+            let dimension = parts.next()?.to_string();
+            let x = parts.next()?.parse().ok()?;
+            let z = parts.next()?.parse().ok()?;
+            Some((dimension, x, z))
+        })
+        .collect())
+}
+
 /// Horizon updated the neighbours of `positions` of `dimension` beside Java mods' blocks: the
 /// mods' blocks hear it (`HorizonServer.neighbours`).
 pub fn neighbours(dimension: &str, positions: &[[i32; 3]]) -> Result<(), String> {

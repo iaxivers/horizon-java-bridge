@@ -1179,6 +1179,9 @@ impl Game<'_> {
                 .get(ADMIN_FEEDBACK_PROPERTY)
                 .is_none_or(|v| v.trim() != "false");
         }
+        // The Java mods first (game/java_server/saves.rs): a vanilla server is up once its
+        // mods are.
+        Self::java_wait_for_start();
         log(
             "INFO",
             &format!(

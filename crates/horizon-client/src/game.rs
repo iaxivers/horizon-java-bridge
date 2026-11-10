@@ -12453,17 +12453,17 @@ impl Game<'_> {
         &self,
         chunks: impl IntoIterator<Item = &'a Arc<horizon_client::chunk::Chunk>>,
     ) -> Vec<Arc<horizon_client::chunk::Chunk>> {
-        horizon_client::save::chunks_with_block_entities(
+        let mut chunks = horizon_client::save::chunks_with_block_entities(
             chunks,
             &self.world.block_entities,
             &self.world.block_names,
-        )
-        .into_iter()
-        .map(|mut c| {
-            self.attach_save_data(&mut c);
-            Arc::new(c)
-        })
-        .collect()
+        );
+        for c in &mut chunks {
+            self.attach_save_data(c);
+        }
+        // The Java mods' block entities, kept on their side (game/java_server/saves.rs).
+        self.java_save_block_entities(&mut chunks);
+        chunks.into_iter().map(Arc::new).collect()
     }
     fn tick_mobs(&mut self) -> Result<()> {
         self.tick_creatures()?;
@@ -15986,6 +15986,8 @@ impl Game<'_> {
     }
     /// Save the level in place: its changed chunks, its entities and its raids.
     fn save_level(&mut self, wait: bool) -> Result<()> {
+        // The chunks whose Java mods' block entities changed are saved too.
+        self.java_mark_block_entity_chunks();
         self.save.save_attachments(&self.world.attachments)?;
         self.save.save_forced_chunks(&self.streaming.forced)?;
         self.streaming.save(&mut self.world, wait);

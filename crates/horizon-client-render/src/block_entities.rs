@@ -294,6 +294,10 @@ impl BlockEntities {
             .filter(move |((cx, cz), _)| !far(*cx, x) && !far(*cz, z))
             .flat_map(|(_, set)| set)
     }
+    /// The mod block entities of chunk `key`, in no order.
+    pub fn mods_in_chunk(&self, key: (i32, i32)) -> impl Iterator<Item = &Pos> {
+        self.mods.get(&key).into_iter().flatten()
+    }
     /// `LevelChunk.getBlockEntity`: the block entity at `pos`, if any.
     pub fn get(&self, pos: &Pos) -> Option<&BlockEntity> {
         self.map.get(pos)

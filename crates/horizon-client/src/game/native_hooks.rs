@@ -9536,6 +9536,8 @@ impl Game<'_> {
         if self.remote.is_some() {
             return;
         }
+        // The Java mods' block entities of these chunks (game/java_server/saves.rs).
+        self.java_chunks_loaded(&loaded);
         let dimension = self.dim.id();
         for (x, z, new) in loaded {
             self.native_chunk_load(dimension, [x, z], new);

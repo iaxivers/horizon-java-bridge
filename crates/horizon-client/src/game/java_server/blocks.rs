@@ -547,6 +547,16 @@ impl Game<'_> {
         if dimension != self.dim.id() {
             return;
         }
+        if snbt.is_empty() {
+            // The mods' side took the mod block entity its chunk brought (it saves it now).
+            if matches!(
+                self.world.block_entities.get(&(x, y, z)),
+                Some(horizon_client::containers::BlockEntity::Mod(_))
+            ) {
+                self.world.block_entities.remove(&(x, y, z));
+            }
+            return;
+        }
         let tag = match horizon_world::nbt::parse_snbt(snbt) {
             Ok((tag, _)) => tag,
             Err(e) => {
@@ -633,6 +643,8 @@ impl Game<'_> {
                 let _ = super::JAVA_FLUID_STATES.set(fluids);
                 let _ = super::JAVA_STATES.set(states);
             }
+            // Mod block entities their chunks brought: the mods make them.
+            self.java_take_loaded_block_entities();
             // Java mods' blocks placed or removed: their block entities made or put away.
             let sets =
                 std::mem::take(&mut *super::JAVA_SETS.lock().unwrap_or_else(|e| e.into_inner()));

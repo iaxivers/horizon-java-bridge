@@ -1120,7 +1120,7 @@ impl Game<'_> {
 
     /// Runs `f`, a call into Java, with the levels as what Java mods read of the world.
     #[track_caller]
-    pub(in crate::game) fn with_java_world<R>(&mut self, f: impl FnOnce() -> R) -> R {
+    pub(in crate::game) fn with_java_world<R>(&self, f: impl FnOnce() -> R) -> R {
         let _timed = super::super::java_profile::Timed::here();
         let registry = self.pack.assets.registry;
         let mut dims: Vec<(&'static str, &ChunkMap)> = vec![(self.dim.id(), &self.world.chunks)];
