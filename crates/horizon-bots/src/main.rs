@@ -92,6 +92,9 @@ horizon-bots: load-test bots for a Minecraft Java Edition 26.3 server (offline m
   --pvp B                fight bots also attack each other (true or false); default true
   --name PREFIX          bot names: PREFIX0, PREFIX1...; default Bot
   --brand B              the client brand sent in configuration (minecraft:brand); default none
+  --fabric               join a Fabric server whose mods add registry entries: register Fabric API's
+                         registry sync channel and acknowledge its sync (the ids it sends are ignored:
+                         bots read no block or item ids)
   --height H             blocks above spawn the bots fly at (walk, explore, idle); default 24
   --ground               claim the ground in every move (with --height 0 on a flat world: walking
                          on it; higher, or over water: a no-fall or jesus cheat, to test an anticheat)
@@ -179,6 +182,8 @@ struct Options {
     name: String,
     /// The `minecraft:brand` to send, if any.
     brand: Option<String>,
+    /// --fabric: answer Fabric API's registry sync, so a Fabric server with mods' blocks lets the bot in.
+    fabric: bool,
     report: Option<String>,
     /// --capture: where the first bot's play packets go.
     capture: Option<String>,
@@ -214,6 +219,7 @@ fn options() -> Result<Options, String> {
         report: None,
         capture: None,
         brand: None,
+        fabric: false,
         timer: 1.0,
     };
     let mut args = std::env::args().skip(1);
@@ -236,6 +242,10 @@ fn options() -> Result<Options, String> {
         }
         if arg == "--ground" {
             o.ground = true;
+            continue;
+        }
+        if arg == "--fabric" {
+            o.fabric = true;
             continue;
         }
         let value = args.next().ok_or(format!("{arg} needs a value"))?;
@@ -751,8 +761,36 @@ fn join(o: &Options, name: &str) -> Result<Connection, String> {
         )
         .map_err(err)?;
     }
+    // Fabric API lets a client in once it says it can take the registry sync (`minecraft:register`,
+    // channel names NUL-separated) and acknowledges it (RegistrySyncManager.configureClient).
+    if o.fabric {
+        c.send(
+            &configuration::Serverbound::CustomPayload(configuration::CustomPayload {
+                channel: "minecraft:register".into(),
+                data: b"fabric:registry/sync\0fabric:registry/sync/complete".to_vec(),
+            })
+            .encode(),
+        )
+        .map_err(err)?;
+    }
     loop {
         let (id, body) = c.recv().map_err(err)?;
+        if o.fabric && id == cb::CUSTOM_PAYLOAD {
+            if let Ok(configuration::Clientbound::CustomPayload(p)) =
+                configuration::Clientbound::decode(id, &body)
+                && p.channel == "fabric:registry/sync"
+            {
+                c.send(
+                    &configuration::Serverbound::CustomPayload(configuration::CustomPayload {
+                        channel: "fabric:registry/sync/complete".into(),
+                        data: Vec::new(),
+                    })
+                    .encode(),
+                )
+                .map_err(err)?;
+            }
+            continue;
+        }
         let reply = match id {
             cb::SELECT_KNOWN_PACKS
             | cb::KEEP_ALIVE

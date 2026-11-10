@@ -606,6 +606,7 @@ impl Game<'_> {
                     && self.comparator_data(p).is_none()
                     && self.pot_data(p).is_none()
                     && self.moving_piston_data(p).is_none()
+                    && self.java_block_entity_data(p).is_none()
                 {
                     return Err(err("commands.data.block.invalid", &[]));
                 }
@@ -648,7 +649,10 @@ impl Game<'_> {
         }
         let key = (p[0], p[1], p[2]);
         let name = self.data_block_name(p);
-        let e = self.world.block_entities.get(&key)?;
+        // A Java mod's block entity lives in the mods' mirror, not Horizon's world.
+        let Some(e) = self.world.block_entities.get(&key) else {
+            return self.java_block_entity_data(p);
+        };
         let mut tag = save::block_entity_data(key, e, &name, self.world.block_lock(key));
         if let (Some(custom), Tag::Compound(map)) = (self.world.block_names.get(&key), &mut tag) {
             map.entry("CustomName".into())

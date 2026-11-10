@@ -35,6 +35,13 @@ impl Game<'_> {
         false
     }
     pub(in crate::game) fn java_random_ticks(&mut self) {}
+    /// `/data get block` on a mod's block entity: its NBT.
+    pub(in crate::game) fn java_block_entity_data(
+        &self,
+        _pos: [i32; 3],
+    ) -> Option<horizon_world::nbt::Tag> {
+        None
+    }
     pub(in crate::game) fn apply_java_level_writes(&mut self) {}
     pub(in crate::game) fn java_block_event(
         &mut self,

@@ -1362,6 +1362,11 @@ Generic fixes found with Create Fly; regress `createpump`, `createfan` (scenes `
 
 ## 26.3 facts that cost time
 
+- **Real Fabric's server refuses clients without Fabric API** once mods add registry entries
+  (registry sync): a protocol bot needs `horizon-bots --fabric` (registers
+  `fabric:registry/sync`, answers `fabric:registry/sync/complete`).
+- **Horizon's dedicated "Done" comes before the Java side on a warm start** (the mods' content
+  cached): wait for `[java] Java mods: the server's start hooks ... ran` before testing mods.
 - **`SyncedBlockEntity.sendData` goes through `ServerChunkCache.blockChanged`**, not
   `ServerLevel.sendBlockUpdated`: a client copy has to treat both as the update packet. And a
   client copy loaded with plain `loadWithComponents` reads with `clientPacket=false`; mods do
@@ -2061,6 +2066,16 @@ Naturalist (mobs with ModelPart models, Fabric API only). The repo's own critter
 (`ENTITY=naturalist:bear` for another mod's).
 
 ## Status
+
+Bridge vs real Fabric (2026-11-10, `bridge-bench`): `tools/java_bridge/bench_vs_fabric.py` runs the
+same mods, seed and scripted scenario (hopper, Create chute and kinetic lines; a bot exploring)
+on a real Fabric 26.3 server and Horizon's `--dedicated`, and reports MSPT, RSS, heap, start
+time, item parity after `/tick step`, a restart's save check and real Fabric opening Horizon's
+save. See [java-bridge-perf.md](java-bridge-perf.md) "Bridge vs real Fabric". Fixed: `/tick
+freeze` now stops the mods' block entities, ticks, entities and spawner; `/data get block` reads
+mods' block entities. Open (found by it): a warm start ticks ~14 s before the Java side is up
+(hoppers lose an item into mods' blocks), mods' block entities aren't in the region files (real
+Fabric loses their data), Create chutes one tick off in some chunks.
 
 Create's pumps, pipes and fans (2026-11-06, `bridge-create-1`): a pump fills a tank from
 Horizon's water and the tank shows it (client copies load the update packets as a client does),

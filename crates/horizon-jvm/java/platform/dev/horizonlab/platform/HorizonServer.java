@@ -643,11 +643,24 @@ public final class HorizonServer {
     }
 
     /** Horizon's world game time, which the mirrored levels read (Level.getGameTime). */
-    public static void gameTime(long time, long seed) {
+    public static void gameTime(long time, long seed, boolean running) {
         if (server == null) return;
         server.getWorldData().overworldData().setGameTime(time);
         HorizonServer.seed = seed;
+        // `/tick freeze` in Horizon: the mirror's levels stand too (tickBody), and mods that
+        // ask the tick rate manager (runsNormally, isEntityFrozen) hear it.
+        HorizonServer.running = running;
+        try {
+            var rate = server.tickRateManager();
+            HorizonClient.set(net.minecraft.world.TickRateManager.class, rate, "isFrozen", !running);
+            HorizonClient.set(net.minecraft.world.TickRateManager.class, rate, "runGameElements", running);
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            // A mirror without its manager: the levels still stand (tickBody).
+        }
     }
+
+    /** Whether Horizon's world runs this tick (not frozen by `/tick freeze`, or stepping). */
+    static boolean running = true;
 
     /** Horizon's mob `attacker` hit the mods' entity `id` (HorizonNeighbours.hurtByHorizon). */
     public static boolean hurtByHorizon(int id, int attacker, float amount) {
@@ -1749,7 +1762,9 @@ public final class HorizonServer {
         }
         phase = HorizonProfile.add("player tick hooks", phase);
         // Mod blocks' scheduled ticks and block entities, as their levels' ticks run them.
-        for (ServerLevel level : new ArrayList<>(LEVELS.values())) {
+        // A frozen world (`/tick freeze`) runs none of these, as vanilla's levels don't
+        // (ServerLevel.tick and Level.tickBlockEntities ask runsNormally()).
+        for (ServerLevel level : running ? new ArrayList<>(LEVELS.values()) : List.<ServerLevel>of()) {
             if (level.getBlockTicks() instanceof HorizonTicks<?> ticks) ticks.run(level);
             // The mods' fluids flow here (HorizonTicks: their scheduled fluid ticks).
             if (level.getFluidTicks() instanceof HorizonTicks<?> ticks) ticks.run(level);
@@ -1758,7 +1773,7 @@ public final class HorizonServer {
         // Horizon's items on and in the mods' blocks (HorizonItems: a depot catching one).
         HorizonItems.touchBlocks();
         playerMotionsBefore();
-        HorizonBlockEntities.tick();
+        if (running) HorizonBlockEntities.tick();
         playerMotionsAfter();
         phase = HorizonProfile.add("block entities", phase);
         HorizonChunkLoads.tick();
@@ -1767,9 +1782,9 @@ public final class HorizonServer {
         HorizonDataFixer.check();
         phase = HorizonProfile.add("tickets, saved data", phase);
         // Mods' entities, as ServerLevel.tick's entity loop runs them.
-        HorizonEntities.tick();
+        if (running) HorizonEntities.tick();
         phase = HorizonProfile.add("entities", phase);
-        HorizonSpawner.tick();
+        if (running) HorizonSpawner.tick();
         phase = HorizonProfile.add("spawner", phase);
         // What the mods did to Horizon's items this tick, to Horizon.
         HorizonItems.report();
@@ -3227,6 +3242,22 @@ public final class HorizonServer {
      * A Horizon hopper under a Java mod's block pulls one item out of it
      * (HorizonHoppers.extract): its SNBT, "" when none, null when it holds no items.
      */
+    /**
+     * `/data get block` on a mod's block entity: its NBT as vanilla's command reads it
+     * (BlockEntity.saveWithFullMetadata, SNBT), or null where no mod block entity is up.
+     */
+    public static String blockEntityData(String dimension, int x, int y, int z) {
+        Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
+        if (server == null) return null;
+        String[] out = {null};
+        fire("block entity data", () -> {
+            ServerLevel level = level(dimension);
+            var tag = HorizonBlockEntities.data(level, new BlockPos(x, y, z));
+            if (tag != null) out[0] = tag.toString();
+        });
+        return out[0];
+    }
+
     public static String hopperExtract(String dimension, int x, int y, int z, int face, boolean anyRoom, String[] partial) {
         Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
         if (server == null) return null;

@@ -387,6 +387,20 @@ pub(super) fn state_string(registry: &BlockRegistry, state: BlockStateId) -> Str
 }
 
 impl Game<'_> {
+    /// `/data get block` on a mod's block entity (`HorizonServer.blockEntityData`): its NBT
+    /// from the mods' mirror, where it lives. None where no mod block entity is up.
+    pub(in crate::game) fn java_block_entity_data(
+        &self,
+        pos: [i32; 3],
+    ) -> Option<horizon_world::nbt::Tag> {
+        if !java_mods_on() {
+            return None;
+        }
+        let snbt = horizon_jvm::events::block_entity_data(self.dim.id(), pos).ok()??;
+        horizon_world::nbt::parse_snbt(&snbt)
+            .ok()
+            .map(|(tag, _)| tag)
+    }
     /// Horizon's mobs within 32 blocks of a player, per dimension, for the mods' mobs to
     /// see (`HorizonNeighbours`): `{"<dimension>": [[id, "type", x, y, z, yaw, health]]}`,
     /// at most 128 a level.

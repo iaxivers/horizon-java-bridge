@@ -406,6 +406,12 @@ impl Game<'_> {
             self.streaming.set_ticketed(wanted);
         }
         let (game_time, seed) = (self.world.game_time, self.level.seed);
+        // `/tick freeze`: the world stands (Game::tick's `running`), and so do the mods' block
+        // entities, scheduled ticks and entities (Level.tickBlockEntities, ServerLevel.tick).
+        let running = self
+            .level_pass
+            .running
+            .unwrap_or_else(|| self.clock.world_runs());
         // Horizon's game rules and difficulty, when they changed: the mods' spawner, their
         // mobs' griefing and despawning in peaceful read the mirror's (HorizonServer.gameRules).
         let rules = {
@@ -484,7 +490,7 @@ impl Game<'_> {
             {
                 log::warn!("Java mods: the client's packets not passed: {e}");
             }
-            let ticked = horizon_jvm::events::game_time(game_time, seed).and_then(|()| {
+            let ticked = horizon_jvm::events::game_time(game_time, seed, running).and_then(|()| {
                 horizon_jvm::events::server_tick(ticks, dedicated, &root, &players, &events)
             });
             let entities = java_mods_on().then(horizon_jvm::events::entities);

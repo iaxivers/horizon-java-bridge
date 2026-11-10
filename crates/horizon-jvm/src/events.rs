@@ -1580,14 +1580,19 @@ pub fn liquid_interactions(dimension: &str, positions: &[[i32; 3]]) -> Result<()
 }
 
 /// The world's game time (`Level.getGameTime`, which mods time their work by: Tom's Storage's
-/// connectors scan every second of it), set before each tick.
-pub fn game_time(time: i64, seed: i64) -> Result<(), String> {
+/// connectors scan every second of it), set before each tick, and whether the world runs this
+/// tick (`/tick freeze` stops the mods' block entities, scheduled ticks and entities too).
+pub fn game_time(time: i64, seed: i64, running: bool) -> Result<(), String> {
     with_server(|env, class| {
         env.call_static_method(
             class,
             "gameTime",
-            "(JJ)V",
-            &[JValue::Long(time), JValue::Long(seed)],
+            "(JJZ)V",
+            &[
+                JValue::Long(time),
+                JValue::Long(seed),
+                JValue::Bool(running.into()),
+            ],
         )?;
         Ok(())
     })?;
@@ -2028,6 +2033,32 @@ pub fn save_all() -> Result<(), String> {
         Ok(())
     })?;
     Ok(())
+}
+
+/// `/data get block` on a mod's block entity: its NBT as SNBT (`BlockEntity.saveWithFullMetadata`,
+/// `HorizonServer.blockEntityData`), `None` where no mod block entity is up at `pos`.
+pub fn block_entity_data(dimension: &str, pos: [i32; 3]) -> Result<Option<String>, String> {
+    let out = with_server(|env, class| {
+        let dimension = env.new_string(dimension)?;
+        let value = env
+            .call_static_method(
+                class,
+                "blockEntityData",
+                "(Ljava/lang/String;III)Ljava/lang/String;",
+                &[
+                    JValue::Object(&dimension),
+                    JValue::Int(pos[0]),
+                    JValue::Int(pos[1]),
+                    JValue::Int(pos[2]),
+                ],
+            )?
+            .l()?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(String::from(env.get_string(&JString::from(value))?)))
+    })?;
+    Ok(out.flatten())
 }
 
 /// The mods' entities of every level as JSON (`HorizonEntityRender.snapshot`): per dimension

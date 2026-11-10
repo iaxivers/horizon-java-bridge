@@ -97,6 +97,17 @@ public final class HorizonBlockEntities {
         return made;
     }
 
+    /**
+     * `/data get block` on a mod's block: the live block entity's NBT (saveWithFullMetadata), or
+     * the saved one not made yet (a frozen world after a restart ticks none); null when none.
+     */
+    public static synchronized CompoundTag data(ServerLevel level, BlockPos pos) {
+        BlockEntity be = peek(level, pos);
+        if (be != null) return be.saveWithFullMetadata(level.registryAccess());
+        CompoundTag saved = saved(level).get(pos.asLong());
+        return saved == null ? null : saved.copy();
+    }
+
     /** The live mod block entity at {@code pos}, without making one (null when none is up). */
     public static synchronized BlockEntity peek(Level level, BlockPos pos) {
         Map<Long, BlockEntity> live = LIVE.get((ServerLevel) level);

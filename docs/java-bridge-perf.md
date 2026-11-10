@@ -197,3 +197,130 @@ once mods' templates are exported.
 - JFR's Java samples miss the mods' GPU work: read `jdk.NativeMethodSample` too (`Gpu.*`).
 - `lab.py decompile` was OOM-killed on 7.6 GB; `javap -c` on `.local/minecraft/26.3/jars/*.jar`
   answers single questions.
+
+## Bridge vs real Fabric (2026-11-10, bridge-bench)
+
+The same mods, seed and scripted scenario on a real Fabric 26.3 dedicated server and on Horizon's
+dedicated server with the bridge, measured the same way: `tools/java_bridge/bench_vs_fabric.py`.
+It answers the merge bar (less memory, lower MSPT, no broken saves, Fabric API parity on
+tick-sensitive item transfer) with numbers.
+
+**Like for like:** both sides are dedicated servers (a real Fabric *client* needs a GPU and a
+login, so the client side isn't compared). Real Fabric: Fabric's installer, downloaded at run time
+from maven.fabricmc.net into the scratch folder (with the loader the bridge pins, 0.20.1), and
+vanilla's `server.jar` from `.local`; nothing of it is committed. Both run the bridge's pinned
+Fabric API (`crates/horizon-jvm/fabric-api.tsv`; Horizon skips the folder's own). Horizon:
+`horizon-client --dedicated --nogui`, the jars in `mods-java/`. By default it runs the headless
+client as players get it (mods' screens and HUDs); `--horizon-java-side server` runs Fabric
+without client code (`HORIZON_JAVA_SIDE=server`), closer to what a Fabric server does.
+
+**The scenario** (console commands through a FIFO, identical on both; built at y 200 in the air,
+force-loaded):
+
+1. Start: launch to ready. Horizon's "Done" comes *before* its Java side on a warm start (the
+   mods' content cached), so its side also waits for the mods' start hooks; the table shows both.
+2. Frozen (`/tick freeze`): 48 vanilla hopper lines (chest → 8 hoppers → chest), 24 Create chute
+   lines (chest → hopper → 4 chutes → chest), 16 Create kinetic lines (creative motor + 8 shafts).
+3. **Parity:** `/tick step 200`, then every container's items and every kinetic block's speed
+   (`/data get block`), diffed between the sides. Dumped again 5 s later, still frozen: anything
+   that moved ticks through `/tick freeze`.
+4. **Load:** unfrozen 120 s (items flowing), `/tick query` every 5 s; then a bot flies out over
+   new chunks for 90 s (`horizon-bots --fabric`: it answers Fabric API's registry sync, which
+   refuses plain clients once mods add blocks).
+5. **Save:** frozen, dumped, `save-all flush`, `stop`, restarted on the same folder, dumped:
+   every block entity back with its id and data keys, every line holding the same items in total.
+6. **Cross-open** (`--cross-open`): Horizon's saved world opened by the real Fabric server, the
+   same check (a player taking the world back to Java).
+
+MSPT: each `/tick query` covers the last 100 ticks; avg is the mean of the windows, P50/P95 the
+median window's, P99 the worst window's. RSS: the server process (Horizon's holds its JVM).
+Heap: `jcmd GC.heap_info` (Horizon's JVM: `-XX:+StartAttachListener`, set by the script).
+
+```sh
+# Once: the game with the bridge (java-mods-dev, as server_test.sh) and the bots
+cargo build --profile fast -p horizon-client -p horizon-client-lib -p horizon-bots --features horizon-client/java-mods-dev
+# Fabric API + Create (any mods folder works; without a Create jar only hopper lines run)
+python3 tools/java_bridge/bench_vs_fabric.py --mods ~/hz-test/bench-mods --cross-open
+# The same, Fabric without client code on Horizon's side (closer to a Fabric server's work)
+python3 tools/java_bridge/bench_vs_fabric.py --mods ~/hz-test/bench-mods --cross-open --horizon-java-side server
+```
+
+It writes `/tmp/hz-bench/last/report.md` (the table), `report.json` (every dump), both servers'
+logs and the bot's report; `--keep` keeps the servers' folders, `--out` moves the results,
+`--fabric-cache DIR` keeps Fabric's installer between runs. Sizes: `--lines`, `--chute-lines`,
+`--kinetic-lines`, `--parity-ticks`, `--run-seconds`, `--explore-seconds`, `--xmx` (the same
+heap cap for both JVMs; default: the JVM's own, 25% of RAM). About 15 minutes with the defaults.
+
+### Smoke test (cloud: 2 shared cores, 7.8 GB, no GPU; NOT the numbers to quote)
+
+Fabric API 0.165.0 + Create Fly 6.0.9 (unofficial 3), seed 1234, the default scenario with 60 s
+of items and 60 s of exploring. Horizon d2af71b731 + this branch's fixes. On these 2 cores both
+servers fight the bot and each other's leftovers; only the user's desktop numbers count.
+
+| | Real Fabric | Horizon + bridge | Horizon, `--horizon-java-side server` |
+|---|---|---|---|
+| Start, launch to ready (s) | 18.0 | 31.3 (cold: content made) | 29.3 |
+| Restart, launch to ready (s; its own "Done") | 17.0 (2.4) | 20.5 (6.7) | 17.6 (6.3) |
+| MSPT avg / P50 / P95 / P99, items running | 0.7 / 0.6 / 0.9 / 31.1 | 2.9 / 2.6 / 4.6 / 23.7 | 2.8 / 2.4 / 4.4 / 37.9 |
+| MSPT avg / P50 / P95 / P99, exploring | 14.3 / 14.0 / 24.5 / 541.9 | 17.6 / 15.6 / 34.9 / 57.6 | 9.9 / 9.0 / 21.3 / 45.8 |
+| RSS items / exploring (MB) | 886 / 946 | 1273 / 1559 | 916 / 1127 |
+| Peak RSS (MB) | 1048 | 1807 | 1313 |
+| Java heap used / committed, exploring (MB) | 484 / 739 | 660 / 708 | 472 / 513 |
+| Chunks the bot got exploring | 1543 | 2092 | 2143 |
+| Parity diffs (200 ticks, 792 block entities) | — | 32 | — |
+| Moved while frozen | 0 | 0 | 0 |
+| Save check (restart) | OK | 24 lines lost an item | OK |
+| Cross-open in real Fabric | — | 312 problems | — |
+
+Reading it (cloud): with items running Horizon's tick costs ~2 ms more (the bridge's per-tick
+work: the mirror's tick, syncing Horizon's hoppers with the mods' blocks); exploring, Horizon
+sends more chunks and its worst windows are far lower (Fabric's P99 is its chunk generation on
+the server thread). Memory: with the headless client Horizon is +0.4–0.8 GB; without it, close to
+Fabric. The headless client is what makes mods' screens and HUDs work for players; it is the
+first place to look for memory and tick time (see "Where the server tick goes" above).
+
+### What it found (bugs)
+
+Fixed in this branch:
+
+1. **`/tick freeze` didn't stop the mods.** The mirror ticked mods' block entities, scheduled
+   ticks, entities and spawner while Horizon's world was frozen (Create's chutes kept dropping
+   items after `/tick step` ended). Now `events::game_time` carries whether the world runs
+   (`Game::tick`'s `running`), `HorizonServer.tickBody` skips those when it doesn't, and the
+   mirror's `TickRateManager` says frozen (`runsNormally`, `isEntityFrozen` for mods).
+2. **`/data get block` on a mod's block entity said "not a block entity".** Horizon's command
+   only looked in its own world; it now asks the mirror (`HorizonServer.blockEntityData`:
+   the live one's `saveWithFullMetadata`, or the saved one not made yet).
+
+Open (the harness shows them; each needs its own fix):
+
+3. **Items lost on a warm restart.** Horizon's dedicated server prints "Done" and ticks the world
+   ~14 s before its Java side is up when the mods' content is cached. In that window a vanilla
+   hopper facing a mod block (a Create chute) pushes one item into it and the item is gone: one
+   copper ingot lost in each of the 24 chute lines; the hopper then stops and fills up (32 items).
+   Fix: hold the world's ticks (or at least transfers into mods' blocks) until the Java side is
+   up, as joins already are.
+4. **Mods' block entities aren't in the region files** (`horizon-java/block_entities/*.nbt`
+   only). Real Fabric opening Horizon's world finds Create's blocks with fresh block entities:
+   kinetic networks and speeds lost (`Network`, `Source`, `Speed` 16 → 0), the items inside
+   chutes lost (each line 4 items short: the 3 in its chutes, and bug 3's; a mod's chest or
+   machine would lose everything it holds). Fix:
+   write the mods' block entities into their chunks' `block_entities` too.
+5. **Create chutes one tick off in some chunks.** After 200 stepped ticks, the 16 chute lines in
+   chunks z = 6 and 8 have one item still in the last chute where Fabric has it in the chest
+   (22 vs 23); the 8 lines in chunk z = 7, every hopper line and every kinetic line match exactly.
+   Probably the order in which the mirror makes or first ticks those block entities.
+6. Minor: Horizon's `/data get block` on a hopper leaves out `TransferCooldown` (vanilla always
+   writes it; Horizon's region files have it).
+
+### Traps
+
+- **Real Fabric refuses a plain client** once mods add registry entries ("requires Fabric Loader
+  and Fabric API installed on your client"): `horizon-bots --fabric` sends `minecraft:register`
+  for `fabric:registry/sync` and acknowledges the sync (`fabric:registry/sync/complete`).
+- A bot flying at spawn + 24 hits mountains and the server pulls it back every tick (silently, no
+  "moved wrongly" line): the harness flies it 200 blocks up.
+- Vanilla's `/forceload add` loads the chunks at once; Horizon's loads them in the background:
+  wait until the area answers (`setblock` → "That position is not loaded" until then).
+- `pause-when-empty-seconds=0` or vanilla's server stops ticking a minute after the last player.
+- 26.3's `/time query gametime` says "The game time is N tick(s)".
