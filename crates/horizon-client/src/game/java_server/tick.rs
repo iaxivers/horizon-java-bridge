@@ -2,7 +2,6 @@
 //! actions they ask back (`events::Action`), applied here.
 use super::*;
 pub(super) use crate::game::lan::LanHost;
-use horizon_client::chunk_map::ChunkMap;
 use horizon_client::{command::args::GameMode as Mode, lan::data::component_nbt, text::Text};
 /// What Java mods hear of a tick (crate horizon-jvm).
 use horizon_jvm::events::Event as JavaEvent;
@@ -1122,24 +1121,32 @@ impl Game<'_> {
         }
     }
 
-    /// Runs `f`, a call into Java, with the levels as what Java mods read of the world.
+    /// Runs `f`, a call into Java, with the levels as what Java mods read of the world, and
+    /// the level in place as what they write (`Level.setBlock` made inside the call). `f`
+    /// can't borrow the game: Java's calls back have it for the call.
     #[track_caller]
-    pub(in crate::game) fn with_java_world<R>(&self, f: impl FnOnce() -> R) -> R {
+    pub(in crate::game) fn with_java_world<R>(&mut self, f: impl FnOnce() -> R) -> R {
         let _timed = super::super::java_profile::Timed::here();
         let registry = self.pack.assets.registry;
-        let mut dims: Vec<(&'static str, &ChunkMap)> = vec![(self.dim.id(), &self.world.chunks)];
-        for dim in self.levels.parked_dims() {
-            if let Some(world) = self.levels.parked_world(dim) {
-                dims.push((dim.id(), &world.chunks));
-            }
-        }
-        let entities = &self.world.block_entities;
+        horizon_jvm::world::with_blocks_mut(
+            &mut JavaBlocks {
+                registry,
+                game: Lent::Write(self),
+            },
+            f,
+        )
+    }
+
+    /// [`Game::with_java_world`] where the game can only be read (a save): what mods set in
+    /// the call is queued.
+    #[track_caller]
+    pub(in crate::game) fn with_java_world_read<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _timed = super::super::java_profile::Timed::here();
+        let registry = self.pack.assets.registry;
         horizon_jvm::world::with_blocks(
             &JavaBlocks {
                 registry,
-                dims,
-                entities,
-                biomes: self.res.biomes(),
+                game: Lent::Read(self),
             },
             f,
         )

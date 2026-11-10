@@ -16,7 +16,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * A mirrored level's blocks are Horizon's: a mod reads them from Horizon's world, by name,
- * and what it sets goes to Horizon (HorizonServer.setBlock). The level holds no chunks.
+ * and what it sets is made in Horizon's world at once (HorizonServer.setBlock). The level holds
+ * no chunks.
  */
 @Mixin(Level.class)
 public abstract class LevelMixin {
@@ -139,7 +140,7 @@ public abstract class LevelMixin {
     @Inject(method = "setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;II)Z",
             at = @At("HEAD"), cancellable = true)
     private void horizon$setBlock(BlockPos pos, BlockState state, int flags, int recursion, CallbackInfoReturnable<Boolean> cir) {
-        if (HorizonServer.isMirror(this)) cir.setReturnValue(HorizonServer.setBlock(HorizonServer.serverSide((Level) (Object) this), pos, state));
+        if (HorizonServer.isMirror(this)) cir.setReturnValue(HorizonServer.setBlock(HorizonServer.serverSide((Level) (Object) this), pos, state, flags));
     }
 
     /**

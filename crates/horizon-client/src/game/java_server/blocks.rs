@@ -178,8 +178,10 @@ pub(super) static JAVA_FLUID_STATES: std::sync::OnceLock<Vec<bool>> = std::sync:
 pub(super) static JAVA_NEIGHBOURS: std::sync::Mutex<Vec<[i32; 3]>> =
     std::sync::Mutex::new(Vec::new());
 
-/// horizon_client::world::SET_HOOK: a Java mod's block placed or removed is kept for the mods.
+/// horizon_client::world::SET_HOOK: a Java mod's block placed or removed is kept for the mods,
+/// and every change is noted for a mod's write running now (its Java side follows them).
 pub(in crate::game) fn java_block_set(pos: (i32, i32, i32), previous: u32, state: u32) {
+    horizon_jvm::world::note_change(pos.0, pos.1, pos.2, state);
     // Before the mods' states are known (the first ticks), every set is kept: the mods look
     // at what is there (a blaze burner placed then had no block entity, ever).
     let java = |id: u32| {
@@ -199,27 +201,63 @@ pub(in crate::game) fn java_block_set(pos: (i32, i32, i32), previous: u32, state
 /// are kept up to this many; the oldest go first.
 pub(super) const MAX_QUEUED_WRITES: usize = 1 << 16;
 
-/// Horizon's levels as Java mods read them during a call (crate horizon-jvm's `world`):
-/// borrowed, not lent, so nothing moves.
-pub(super) struct JavaBlocks<'a> {
+/// Horizon's levels as Java mods read and write them during a call (crate horizon-jvm's
+/// `world`): the game, lent for the call ([`Game::with_java_world`]). Reads look at its levels
+/// as they are now (a write in the call changes them); writes go through
+/// [`Game::java_set_block_now`].
+pub(super) struct JavaBlocks<'a, 'g> {
     pub(super) registry: &'static BlockRegistry,
-    pub(super) dims: Vec<(&'static str, &'a ChunkMap)>,
-    /// The level running now (the first of `dims`) and its block entities.
-    pub(super) entities: &'a horizon_client::block_entities::BlockEntities,
-    pub(super) biomes: &'a horizon_client::biome::Biomes,
+    pub(super) game: Lent<'a, 'g>,
 }
-impl horizon_jvm::world::Blocks for JavaBlocks<'_> {
+/// The game as a call into Java has it: to read only (a save), or to write to as well.
+pub(super) enum Lent<'a, 'g> {
+    Read(&'a Game<'g>),
+    Write(&'a mut Game<'g>),
+}
+impl<'g> JavaBlocks<'_, 'g> {
+    fn game(&self) -> &Game<'g> {
+        match &self.game {
+            Lent::Read(game) => game,
+            Lent::Write(game) => game,
+        }
+    }
+    /// `dimension`'s chunks: the level in place's, or a parked level's.
+    fn chunks(&self, dimension: &str) -> Option<&ChunkMap> {
+        let game = self.game();
+        if dimension == game.dim.id() {
+            return Some(&game.world.chunks);
+        }
+        let dim = super::super::Dim::known(dimension)?;
+        game.levels.parked_world(dim).map(|w| &w.chunks)
+    }
+}
+impl horizon_jvm::world::Blocks for JavaBlocks<'_, '_> {
     fn block(&self, dimension: &str, x: i32, y: i32, z: i32) -> Option<String> {
-        let (_, chunks) = self.dims.iter().find(|(d, _)| *d == dimension)?;
+        let chunks = self.chunks(dimension)?;
         let chunk = chunks.get(&(x >> 4, z >> 4))?;
         Some(state_string(self.registry, chunk.block(x & 15, y, z & 15)))
     }
+    fn set_block(
+        &mut self,
+        dimension: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: &str,
+        flags: i32,
+    ) -> Option<horizon_jvm::world::Written> {
+        match &mut self.game {
+            Lent::Write(game) => game.java_set_block_now(dimension, [x, y, z], state, flags),
+            Lent::Read(_) => None,
+        }
+    }
     fn block_entity(&self, dimension: &str, x: i32, y: i32, z: i32) -> Option<String> {
-        let (current, chunks) = self.dims.first()?;
-        if *current != dimension {
+        let game = self.game();
+        if game.dim.id() != dimension {
             return None;
         }
-        let e = self.entities.get(&(x, y, z))?;
+        let chunks = &game.world.chunks;
+        let e = game.world.block_entities.get(&(x, y, z))?;
         let state = chunks.get(&(x >> 4, z >> 4))?.block(x & 15, y, z & 15);
         let name = self.registry.state(state)?.name.clone();
         // BlockEntity.saveWithFullMetadata: no chunk-only keepPacked.
@@ -230,7 +268,7 @@ impl horizon_jvm::world::Blocks for JavaBlocks<'_> {
         Some(horizon_client::snbt::to_snbt(&tag))
     }
     fn light(&self, dimension: &str, x: i32, y: i32, z: i32) -> Option<u8> {
-        let (_, chunks) = self.dims.iter().find(|(d, _)| *d == dimension)?;
+        let chunks = self.chunks(dimension)?;
         Some(chunks.get(&(x >> 4, z >> 4))?.light(x & 15, y, z & 15))
     }
     fn column(
@@ -241,7 +279,7 @@ impl horizon_jvm::world::Blocks for JavaBlocks<'_> {
         min_y: i32,
         out: &mut [i32],
     ) -> Option<Vec<String>> {
-        let (_, chunks) = self.dims.iter().find(|(d, _)| *d == dimension)?;
+        let chunks = self.chunks(dimension)?;
         let chunk = chunks.get(&(cx, cz))?;
         // Whole sections unpacked at once (Java asks for one section at a time, or the
         // whole column): a few states each, found by a short search, not a hash.
@@ -301,7 +339,7 @@ impl horizon_jvm::world::Blocks for JavaBlocks<'_> {
         cz: i32,
         out: &mut [i32],
     ) -> Option<bool> {
-        let Some((_, chunks)) = self.dims.iter().find(|(d, _)| *d == dimension) else {
+        let Some(chunks) = self.chunks(dimension) else {
             return Some(false);
         };
         let Some(chunk) = chunks.get(&(cx, cz)) else {
@@ -320,7 +358,7 @@ impl horizon_jvm::world::Blocks for JavaBlocks<'_> {
         Some(true)
     }
     fn chunk_revision(&self, dimension: &str, cx: i32, cz: i32) -> i64 {
-        let Some((_, chunks)) = self.dims.iter().find(|(d, _)| *d == dimension) else {
+        let Some(chunks) = self.chunks(dimension) else {
             return -2;
         };
         chunks
@@ -328,7 +366,7 @@ impl horizon_jvm::world::Blocks for JavaBlocks<'_> {
             .map_or(-2, |chunk| chunk.block_revision.get() as i64)
     }
     fn surface(&self, dimension: &str, x: i32, z: i32) -> Option<i32> {
-        let (_, chunks) = self.dims.iter().find(|(d, _)| *d == dimension)?;
+        let chunks = self.chunks(dimension)?;
         let chunk = chunks.get(&(x >> 4, z >> 4))?;
         let registry = self.registry;
         Some(chunk.world_surface(x & 15, z & 15, |v| {
@@ -354,7 +392,7 @@ impl horizon_jvm::world::Blocks for JavaBlocks<'_> {
         min_y: i32,
         out: &mut [i32],
     ) -> Option<Vec<String>> {
-        let (_, chunks) = self.dims.iter().find(|(d, _)| *d == dimension)?;
+        let chunks = self.chunks(dimension)?;
         let chunk = chunks.get(&(cx, cz))?;
         let mut palette = Vec::new();
         let mut index: std::collections::HashMap<u16, i32> = std::collections::HashMap::new();
@@ -362,11 +400,20 @@ impl horizon_jvm::world::Blocks for JavaBlocks<'_> {
             let (qx, qz, qy) = ((i & 3) as i32, ((i >> 2) & 3) as i32, (i >> 4) as i32);
             let biome = chunk.biome(qx * 4, min_y + qy * 4, qz * 4);
             *slot = *index.entry(biome).or_insert_with(|| {
-                palette.push(self.biomes.get(biome).name.clone());
+                palette.push(self.game().res.biomes().get(biome).name.clone());
                 palette.len() as i32 - 1
             });
         }
         Some(palette)
+    }
+}
+
+/// What was added to `list` from `from` on, taken (all of it if something took from it since).
+fn tail<T>(list: &mut Vec<T>, from: usize) -> Vec<T> {
+    if list.len() >= from {
+        list.split_off(from)
+    } else {
+        std::mem::take(list)
     }
 }
 
@@ -835,6 +882,103 @@ impl Game<'_> {
                 log::warn!("Java mods: after a block break: {e}");
             }
         }
+    }
+
+    /// A Java mod's `Level.setBlock(pos, state, flags)` on the level in place, made now, inside
+    /// its call (`horizon_jvm::world::Blocks::set_block`): vanilla's set with the mod's flags
+    /// (neighbour and shape updates, Horizon's block entity replaced), so the mod's next read
+    /// sees it. Returns the mods' blocks it placed or removed and the neighbours it updated
+    /// beside them, for the Java side to run their part (block entities, `onPlace`, their
+    /// neighbour updates). None where it can't be made now (another level, a chunk not loaded,
+    /// this game a client): the write is queued (`Action::SetBlock`).
+    pub(super) fn java_set_block_now(
+        &mut self,
+        dimension: &str,
+        pos: [i32; 3],
+        state: &str,
+        flags: i32,
+    ) -> Option<horizon_jvm::world::Written> {
+        if self.remote.is_some() || dimension != self.dim.id() || !self.world.loaded(pos[0], pos[2])
+        {
+            return None;
+        }
+        let registry = self.pack.assets.registry;
+        let parsed = match crate::game::render_control::parse_state(registry, state) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                log::warn!("Java mods: a mod set {state}: {e}");
+                return Some(Default::default());
+            }
+        };
+        // A write queued before at the same place (its chunk wasn't loaded then) is older.
+        self.mods
+            .java
+            .block_writes
+            .retain(|(d, p, _)| !(d == dimension && *p == pos));
+        // What this write (and its cascade) adds to the mods' lists is theirs to run now.
+        let sets_from = JAVA_SETS.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let neighbours_from = JAVA_NEIGHBOURS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        let changed = match self.java_place(pos, parsed, flags) {
+            Ok(changed) => changed,
+            Err(e) => {
+                log::debug!("Java mods: a mod's block at {pos:?}: {e}");
+                false
+            }
+        };
+        let sets = tail(
+            &mut JAVA_SETS.lock().unwrap_or_else(|e| e.into_inner()),
+            sets_from,
+        );
+        let neighbours = tail(
+            &mut JAVA_NEIGHBOURS.lock().unwrap_or_else(|e| e.into_inner()),
+            neighbours_from,
+        );
+        let mut seen = std::collections::HashSet::new();
+        Some(horizon_jvm::world::Written {
+            changed,
+            changes: Vec::new(),
+            sets: sets
+                .into_iter()
+                .map(|([x, y, z], previous)| [x, y, z, previous.map_or(-1, |p| p as i32)])
+                .collect(),
+            neighbours: neighbours.into_iter().filter(|p| seen.insert(*p)).collect(),
+        })
+    }
+
+    /// `Level.setBlock` with the caller's flags, as a mod's write makes it: false when the
+    /// state was there already. Horizon's block entity goes with its block (without side
+    /// effects, as before) and the new block's is made, as `LevelChunk.setBlockState` does.
+    fn java_place(
+        &mut self,
+        pos: [i32; 3],
+        state: BlockStateId,
+        flags: i32,
+    ) -> horizon_client::Result<bool> {
+        let previous = self.world.block(pos[0], pos[1], pos[2]);
+        if previous == state {
+            return Ok(false);
+        }
+        let (old, new) = (
+            self.res.facts().get(previous).name.clone(),
+            self.res.facts().get(state).name.clone(),
+        );
+        let key = (pos[0], pos[1], pos[2]);
+        if old != new {
+            self.jukebox_removed(pos);
+            self.world.block_entities.remove(&key);
+        }
+        self.level_set_with_flags(pos, state, flags)?;
+        let landed = self.world.block(pos[0], pos[1], pos[2]);
+        if old != new
+            && self.res.facts().get(landed).name == new
+            && let Some(entity) = self.new_block_entity(&new)
+        {
+            self.world.block_entities.insert(key, entity);
+        }
+        Ok(true)
     }
 
     /// Makes the blocks Java mods set in the level in place, in order, as `/setblock` does,

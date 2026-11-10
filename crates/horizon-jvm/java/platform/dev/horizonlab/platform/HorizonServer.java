@@ -2568,21 +2568,84 @@ public final class HorizonServer {
         return new Section(indices, parsed);
     }
 
-    /** A mod's Level.setBlock on a mirrored level: Horizon makes it; reads see it at once. */
+    /** A mod's Level.setBlock on a mirrored level, with vanilla's default flags (UPDATE_ALL). */
     public static boolean setBlock(Level level, BlockPos pos, BlockState state) {
+        return setBlock(level, pos, state, net.minecraft.world.level.block.Block.UPDATE_ALL);
+    }
+
+    /**
+     * A mod's Level.setBlock(pos, state, flags) on a mirrored level: Horizon makes it now, inside
+     * this call (Natives.setBlockNow: vanilla's set with the flags, neighbour and shape updates),
+     * then the mods' blocks it placed or removed get their part here (block entities, onPlace,
+     * affectNeighborsAfterRemoval, their neighbour updates), so the mod's next read sees it all,
+     * as in vanilla. Where Horizon can't make it now (another dimension, a chunk not loaded, no
+     * view), it is queued and kept (WRITTEN) until Horizon has made it.
+     */
+    public static boolean setBlock(Level level, BlockPos pos, BlockState state, int flags) {
         if (level.isOutsideBuildHeight(pos)) return false;
         // A client half's prediction (a door opened on both sides): the server's change is the
         // one made, as a client's predicted blocks give way to the server's.
         if (clientHalf == Thread.currentThread()) return true;
+        ServerLevel server = (ServerLevel) level;
+        String name = net.minecraft.commands.arguments.blocks.BlockStateParser.serialize(state);
+        int[] done = Natives.setBlockNow(dimensionOf(level), pos.getX(), pos.getY(), pos.getZ(), name, flags);
+        if (done != null) {
+            if (anyWritten) synchronized (WRITTEN) {
+                Map<Long, BlockState> written = WRITTEN.get(server);
+                if (written != null) written.remove(pos.asLong());
+            }
+            return settle(server, done, flags);
+        }
         synchronized (WRITTEN) {
-            WRITTEN.computeIfAbsent((ServerLevel) level, l -> new java.util.HashMap<>()).put(pos.asLong(), state);
+            WRITTEN.computeIfAbsent(server, l -> new java.util.HashMap<>()).put(pos.asLong(), state);
             anyWritten = true;
             WRITTEN_AT.put(pos.asLong(), currentTick);
         }
-        HorizonChunks.set((ServerLevel) level, pos, state);
-        Natives.setBlock(dimensionOf(level), pos.getX(), pos.getY(), pos.getZ(),
-                net.minecraft.commands.arguments.blocks.BlockStateParser.serialize(state));
+        HorizonChunks.set(server, pos, state);
+        Natives.setBlock(dimensionOf(level), pos.getX(), pos.getY(), pos.getZ(), name);
         return true;
+    }
+
+    /**
+     * What Horizon made of a write (Natives.setBlockNow's answer), followed here: this thread's
+     * copies of the blocks it changed, then the mods' blocks it placed or removed (their block
+     * entities, onPlace, affectNeighborsAfterRemoval: LevelChunk.setBlockState's part), then the
+     * mods' blocks beside the neighbours Horizon updated. Whether the block changed.
+     */
+    private static boolean settle(ServerLevel level, int[] done, int flags) {
+        int i = 0;
+        boolean changed = done[i++] != 0;
+        int changes = done[i++];
+        for (int c = 0; c < changes; c++, i += 4) follow(level, done[i], done[i + 1], done[i + 2], done[i + 3]);
+        int sets = done[i++];
+        for (int c = 0; c < sets; c++, i += 4) {
+            BlockPos at = new BlockPos(done[i], done[i + 1], done[i + 2]);
+            BlockState old = done[i + 3] < 0 ? null : stateById(done[i + 3]);
+            placed(level, at, old, flags);
+        }
+        int updated = done[i++];
+        if (updated > 0) neighbours(level, java.util.Arrays.copyOfRange(done, i, i + updated * 3));
+        return changed;
+    }
+
+    /** A block Horizon changed in this thread's view: its copies here (sections, chunk copies) follow. */
+    private static void follow(ServerLevel level, int x, int y, int z, int id) {
+        Sections sections = SECTIONS.get();
+        var map = sections.levels.get(level);
+        if (map != null) {
+            long key = net.minecraft.core.SectionPos.asLong(x >> 4, y >> 4, z >> 4);
+            Section section = map.get(key);
+            if (section != null && section != NONE && section.palette() == null) {
+                section.index()[(y & 15) << 8 | (z & 15) << 4 | (x & 15)] = id;
+            } else if (section != null) {
+                map.remove(key);
+                if (sections.lastLevel == level && sections.lastKey == key) sections.last = null;
+            }
+        }
+        // The chunk's revision is another now: a section of it not read yet is read anew.
+        var revisions = sections.revisions.get(level);
+        if (revisions != null) revisions.remove(net.minecraft.world.level.ChunkPos.pack(x >> 4, z >> 4));
+        HorizonChunks.set(level, new BlockPos(x, y, z), stateById(id));
     }
 
     /** The blocks this call set on a mirrored level, Horizon not having made them yet (a copy). */
@@ -2948,32 +3011,44 @@ public final class HorizonServer {
         java.util.Set<Long> placed = new java.util.HashSet<>();
         for (int i = 0; i + 2 < positions.length; i += 3) {
             BlockPos pos = new BlockPos(positions[i], positions[i + 1], positions[i + 2]);
-            fire("BlockEntity (made)", () -> HorizonBlockEntities.ensure(level, pos));
-            // What vanilla's LevelChunk.setBlockState does for the block it replaces and the one
-            // it sets (the mirror's setBlock and Horizon's world do neither for mods' blocks):
-            // the old block's affectNeighborsAfterRemoval, the new one's onPlace (Create's track
-            // joins its railway graph there). Once a position a call (its first set's old block).
+            // Once a position a call (its first set's old block).
             int k = i / 3;
-            if (k < before.length && !before[k].isEmpty() && placed.add(pos.asLong())) {
-                BlockState old = parseState(before[k]);
-                BlockState now = level.getBlockState(pos);
-                if (old != null && old != now) {
-                    if (!old.is(now.getBlock()) && HorizonBlockEntities.modded(old) && ownsVanilla(old.getBlock(), "affectNeighborsAfterRemoval")) {
-                        fire("BlockState.affectNeighborsAfterRemoval", () -> old.affectNeighborsAfterRemoval(level, pos, false));
-                    }
-                    if (HorizonBlockEntities.modded(now) && ownsVanilla(now.getBlock(), "onPlace")) {
-                        fire("BlockState.onPlace", () -> now.onPlace(level, pos, old, false));
-                    }
-                }
+            BlockState old = k < before.length && !before[k].isEmpty() && placed.add(pos.asLong())
+                    ? parseState(before[k]) : null;
+            placed(level, pos, old, net.minecraft.world.level.block.Block.UPDATE_ALL);
+        }
+    }
+
+    /**
+     * What vanilla's LevelChunk.setBlockState does for a mod's block it replaces and the one it
+     * sets (Horizon's world does neither for mods' blocks): the old block's block entity goes
+     * (its contents dropped, as preRemoveSideEffects, unless the flags skip it), its
+     * affectNeighborsAfterRemoval, the new one's onPlace (Create's track joins its railway graph
+     * there), the new block entity made (it ticks from its placement, as vanilla's do). Old null:
+     * nothing was set there (a mod's fluid beside a change: its tick only).
+     */
+    private static void placed(ServerLevel level, BlockPos pos, BlockState old, int flags) {
+        BlockState now = level.getBlockState(pos);
+        boolean moved = (flags & net.minecraft.world.level.block.Block.UPDATE_MOVE_BY_PISTON) != 0;
+        if (old != null && old != now) {
+            HorizonBlockEntities.replaced(level, pos, now,
+                    (flags & net.minecraft.world.level.block.Block.UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS) == 0);
+            if (!old.is(now.getBlock()) && HorizonBlockEntities.modded(old) && ownsVanilla(old.getBlock(), "affectNeighborsAfterRemoval")) {
+                fire("BlockState.affectNeighborsAfterRemoval", () -> old.affectNeighborsAfterRemoval(level, pos, moved));
             }
-            // A mod's fluid placed, or a neighbour of it changed (Horizon tells: the mod's
-            // liquid block carries a vanilla template, LevelAccess::foreign_fluid): its tick,
-            // as LiquidBlock.onPlace / neighborChanged / updateShape schedule it. The mirror
-            // runs it (HorizonTicks), with the fluid's own delay.
-            var fluid = level.getFluidState(pos);
-            if (modFluid(fluid.getType())) {
-                level.scheduleTick(pos, fluid.getType(), fluid.getType().getTickDelay(level));
+            if ((flags & net.minecraft.world.level.block.Block.UPDATE_SKIP_ON_PLACE) == 0
+                    && HorizonBlockEntities.modded(now) && ownsVanilla(now.getBlock(), "onPlace")) {
+                fire("BlockState.onPlace", () -> now.onPlace(level, pos, old, moved));
             }
+        }
+        fire("BlockEntity (made)", () -> HorizonBlockEntities.ensure(level, pos));
+        // A mod's fluid placed, or a neighbour of it changed (Horizon tells: the mod's
+        // liquid block carries a vanilla template, LevelAccess::foreign_fluid): its tick,
+        // as LiquidBlock.onPlace / neighborChanged / updateShape schedule it. The mirror
+        // runs it (HorizonTicks), with the fluid's own delay.
+        var fluid = level.getFluidState(pos);
+        if (modFluid(fluid.getType())) {
+            level.scheduleTick(pos, fluid.getType(), fluid.getType().getTickDelay(level));
         }
     }
 
@@ -3005,6 +3080,10 @@ public final class HorizonServer {
         if (server == null) return;
         ServerLevel level = level(dimension);
         if (level == null) return;
+        neighbours(level, positions);
+    }
+
+    private static void neighbours(ServerLevel level, int[] positions) {
         for (int i = 0; i + 2 < positions.length; i += 3) {
             BlockPos from = new BlockPos(positions[i], positions[i + 1], positions[i + 2]);
             BlockState source = level.getBlockState(from);

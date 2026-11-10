@@ -143,8 +143,18 @@ public final class Natives {
     /** The chunks of the dimension Horizon generated since the last call: cx, cz pairs. */
     public static native int[] freshChunks(String dimension);
 
-    /** A mod set a block of a mirrored level: Horizon makes it, as /setblock does. */
+    /** A mod set a block of a mirrored level Horizon can't write now: queued, made after the call. */
     public static native void setBlock(String dimension, int x, int y, int z, String state);
+
+    /**
+     * A mod's Level.setBlock made in Horizon's world now, with vanilla's updates (neighbours,
+     * shapes, block entities): {changed (0/1), n, (x, y, z, Horizon's new state id) per block the
+     * set changed, n, (x, y, z, the state id replaced, -1 for none) per mod block placed or
+     * removed, n, (x, y, z) per position whose neighbours Horizon updated beside a mod's block}.
+     * Null where Horizon can't write there now (another dimension, a chunk not loaded, no view):
+     * queue it with setBlock.
+     */
+    public static native int[] setBlockNow(String dimension, int x, int y, int z, String state, int flags);
 
     /** A mod dropped an item (a block's drops): Horizon spawns the item entity. */
     public static native void dropItem(String dimension, double x, double y, double z,

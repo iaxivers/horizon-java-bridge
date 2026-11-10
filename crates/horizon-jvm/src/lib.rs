@@ -861,6 +861,11 @@ fn boot(env: &mut JNIEnv, jars: &[PathBuf]) -> jni::errors::Result<String> {
                 fn_ptr: native_set_block as *mut c_void,
             },
             NativeMethod {
+                name: "setBlockNow".into(),
+                sig: "(Ljava/lang/String;IIILjava/lang/String;I)[I".into(),
+                fn_ptr: native_set_block_now as *mut c_void,
+            },
+            NativeMethod {
                 name: "dropItem".into(),
                 sig: "(Ljava/lang/String;DDDDDDLjava/lang/String;I)V".into(),
                 fn_ptr: native_drop_item as *mut c_void,
@@ -1825,6 +1830,42 @@ extern "system" fn native_set_block(
             state: state.into(),
         });
     }));
+}
+
+/// `Natives.setBlockNow(String dimension, int x, int y, int z, String state, int flags)`:
+/// `Level.setBlock` made in Horizon's world inside this call (`world::set_block`), as
+/// [`world::Written::flat`]; null where the view can't (Java queues it with `setBlock`).
+#[allow(clippy::too_many_arguments)]
+extern "system" fn native_set_block_now<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    dimension: JString<'local>,
+    x: sys::jint,
+    y: sys::jint,
+    z: sys::jint,
+    state: JString<'local>,
+    flags: sys::jint,
+) -> sys::jintArray {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (Ok(dimension), Ok(state)) = (
+            env.get_string(&dimension).map(String::from),
+            env.get_string(&state).map(String::from),
+        ) else {
+            return std::ptr::null_mut();
+        };
+        let Some(written) = world::set_block(&dimension, x, y, z, &state, flags) else {
+            return std::ptr::null_mut();
+        };
+        let flat = written.flat();
+        let Ok(array) = env.new_int_array(flat.len() as i32) else {
+            return std::ptr::null_mut();
+        };
+        if env.set_int_array_region(&array, 0, &flat).is_err() {
+            return std::ptr::null_mut();
+        }
+        array.into_raw()
+    }))
+    .unwrap_or(std::ptr::null_mut())
 }
 
 /// `Natives.dropItem(String dimension, double x, y, z, double vx, vy, vz, String item, int count)`.

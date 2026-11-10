@@ -241,6 +241,17 @@ public final class HorizonBlockEntities {
         return live == null ? java.util.List.of() : new ArrayList<>(live.values());
     }
 
+    /**
+     * The block at {@code pos} is {@code now}: a live mod block entity that no longer fits it goes
+     * (LevelChunk.setBlockState's removal), its contents dropped when {@code drop}
+     * (preRemoveSideEffects, unless the write's flags skip it).
+     */
+    public static synchronized void replaced(Level level, BlockPos pos, BlockState now, boolean drop) {
+        Map<Long, BlockEntity> live = LIVE.get((ServerLevel) level);
+        BlockEntity be = live == null ? null : live.get(pos.asLong());
+        if (be != null && !(modded(now) && be.getType().isValid(now))) remove(level, live, pos.asLong(), be, drop);
+    }
+
     /** A mod block placed at {@code pos}: its block entity made, if it has one and none is up. */
     public static synchronized void ensure(Level level, BlockPos pos) {
         BlockState state = HorizonServer.blockState(level, pos);
@@ -434,12 +445,15 @@ public final class HorizonBlockEntities {
     /** Each server tick: the tickers run; gone blocks drop, unloaded ones are put away. */
     public static synchronized void tick() {
         refreshVanilla();
-        for (Map.Entry<ServerLevel, Map<Long, BlockEntity>> e : LIVE.entrySet()) {
+        // A ticker's writes are made at once (HorizonServer.setBlock): a block entity they make
+        // ticks from the next tick, one they remove ticks no more, as vanilla's pending tickers.
+        for (Map.Entry<ServerLevel, Map<Long, BlockEntity>> e : new ArrayList<>(LIVE.entrySet())) {
             ServerLevel level = e.getKey();
             Map<Long, BlockEntity> live = e.getValue();
             String dimension = level.dimension().identifier().toString();
             for (Map.Entry<Long, BlockEntity> entry : new ArrayList<>(live.entrySet())) {
                 BlockEntity be = entry.getValue();
+                if (be.isRemoved() || live.get(entry.getKey()) != be) continue;
                 BlockPos pos = be.getBlockPos();
                 String name = Natives.blockState(dimension, pos.getX(), pos.getY(), pos.getZ());
                 if (name == null) {

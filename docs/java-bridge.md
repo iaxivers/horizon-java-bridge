@@ -42,9 +42,19 @@ saying something works.
    screens (`HorizonClient.sendFrames`: tasks, screen ticks, frames), `syncInventories`
    (Horizon's block entities written back, menus shown, mods' messages delivered).
 2. Java sends results back as actions (`Natives.*` → `events::Action`), applied in
-   `java_server/tick.rs` (`apply_java_actions`).
+   `java_server/tick.rs` (`apply_java_actions`). Blocks are not actions: a mod's
+   `Level.setBlock(pos, state, flags)` is made in Horizon's world inside the Java call
+   (`Natives.setBlockNow` → `world::set_block` → the lent game's `java_set_block_now`:
+   Horizon's `set_block` with the mod's flags, neighbour and shape updates, Horizon's block
+   entity replaced), then the Java side follows every block it changed (its section copies,
+   `HorizonServer.follow`) and runs the mods' part of `LevelChunk.setBlockState`
+   (`HorizonServer.settle`: block entities made or dropped, `onPlace`,
+   `affectNeighborsAfterRemoval`, the mods' blocks' neighbour updates), so the mod's next
+   read sees it all. Only a write Horizon can't make now (another dimension, a chunk not
+   loaded, no world lent) is still queued (`Action::SetBlock`, kept in `WRITTEN` until made).
 3. Horizon's world changes of Java mod blocks reach Java through `world::SET_HOOK` →
-   `events::block_entities` (block entities exist from placement).
+   `events::block_entities` (block entities exist from placement); those a mod's write made
+   are run inside the write instead (`Written.sets`, `Written.neighbours`).
 4. Mods' entities: `HorizonEntities.tick` in the server tick; after it `events::entities`
    gives a JSON snapshot (`HorizonEntityRender.snapshot`), which `send_java_entities` sends
    each connection (its level, within 160 blocks) on `horizon:java_entities` with the model
@@ -1362,6 +1372,17 @@ Generic fixes found with Create Fly; regress `createpump`, `createfan` (scenes `
 
 ## 26.3 facts that cost time
 
+- **A mod's `setBlock` is made inside its call** (bridge-sync). `with_java_world` lends the game
+  mutably (`&mut self`: a closure can't hold a borrow of it), and `JavaBlocks` reads Horizon's
+  chunks through pointers each time, so a read after a write sees it. Java's per-thread section
+  copies (`HorizonServer.Sections`) are patched in place with the write's changes
+  (`Written.changes`, every block the cascade changed, a nested write's included, in order), and
+  the chunk's cached revision is dropped so a section not read yet is read anew; KEPT copies from
+  earlier views are keyed by the old revision and never served again. `HorizonBlockEntities.tick`
+  iterates copies and skips a block entity a ticker's write removed (`isRemoved`), as vanilla's
+  pending tickers do. The mod's flags are vanilla's (`UPDATE_KNOWN_SHAPE` skips the shape updates,
+  2 alone no neighbour updates); before, every write was `UPDATE_ALL`.
+
 - **Real Fabric's server refuses clients without Fabric API** once mods add registry entries
   (registry sync): a protocol bot needs `horizon-bots --fabric` (registers
   `fabric:registry/sync`, answers `fabric:registry/sync/complete`).
@@ -2082,6 +2103,16 @@ Naturalist (mobs with ModelPart models, Fabric API only). The repo's own critter
 (`ENTITY=naturalist:bear` for another mod's).
 
 ## Status
+
+Mods' writes made inside their call (2026-11-10, `bridge-sync` step 1): a mod's `Level.setBlock`
+goes straight into Horizon's world during the Java call (`Natives.setBlockNow`), with the mod's
+flags and vanilla's update cascade (Horizon's neighbour and shape updates, Horizon's block entity
+replaced; then on the mirror the mods' block entities made or dropped, `onPlace`,
+`affectNeighborsAfterRemoval`, the mods' blocks' neighbour updates), and the mod's next read sees
+it (its section copies follow every block the cascade changed). The deferred queue and Java's
+overlay (`WRITTEN`) are left only for writes Horizon can't make now (another dimension, a chunk not
+loaded). `setBlock` returns vanilla's answer (false when nothing changed). Regress and the bench:
+see java-bridge-perf.md "Synchronous writes and the tick in Horizon's".
 
 Bench fixes (2026-11-10, `bridge-benchfix`): mods' block entities are saved in their chunks
 (real Fabric opening Horizon's world keeps Create's networks and chute items: 312 problems → 0;
