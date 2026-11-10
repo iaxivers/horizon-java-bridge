@@ -40,6 +40,10 @@ impl Game<'_> {
         let mut spawners = Vec::new();
         let mut trial_spawners = Vec::new();
         self.item_columns = Some(Default::default());
+        // Java mods' block entities hold placeholders in the list, in the order they were made:
+        // those reached since the last of Horizon's own tick on the mods' side before it.
+        self.java_block_entities_start();
+        let mut java = Vec::new();
         for slot in self.world.block_entity_tickers().iter().copied() {
             let pos = slot.0;
             // Ticks before this one can remove it (`TickingBlockEntity.isRemoved`).
@@ -50,6 +54,11 @@ impl Game<'_> {
             {
                 continue;
             }
+            if self.world.block_entities.is_foreign(&pos) {
+                java.push([pos.0, pos.1, pos.2]);
+                continue;
+            }
+            self.java_tick_block_entities(&mut java);
             match self.world.block_entities.get(&pos) {
                 Some(BlockEntity::Chest(items)) if items.len() == HOPPER_SLOTS => {
                     self.tick_hopper(pos)
@@ -84,6 +93,8 @@ impl Game<'_> {
                 _ => {}
             }
         }
+        self.java_tick_block_entities(&mut java);
+        self.java_block_entities_end();
         // Items move between passes: the columns hold for this one only.
         self.item_columns = None;
         self.update_song_volumes();

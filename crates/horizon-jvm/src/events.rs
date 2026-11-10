@@ -1729,6 +1729,109 @@ pub fn changed_block_entity_chunks() -> Result<Vec<(String, i32, i32)>, String> 
         .collect())
 }
 
+/// Whether Horizon drives the levels' parts of the mirror's tick (`HorizonServer.phased`):
+/// [`level_phase`], [`level_block_entities`], [`player_tick`] and [`tick_end`] from inside its
+/// own ticks, after [`server_tick`] ran the tick's start.
+pub fn phased(on: bool) -> Result<(), String> {
+    with_server(|env, class| {
+        env.call_static_method(class, "phased", "(Z)V", &[JValue::Bool(on.into())])?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// The level parts of the mirror's tick, called from inside Horizon's tick of `dimension`
+/// (`HorizonServer.levelPhase`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LevelPhase {
+    /// Its start: `START_LEVEL_TICK`, `ServerLevel.tick`'s head.
+    Start = 0,
+    /// The mods' scheduled block and fluid ticks.
+    ScheduledTicks = 1,
+    /// Its block entities ended: what the mods did to Horizon's items, reported.
+    BlockEntitiesEnd = 2,
+    /// Its end: `ServerLevel.tick`'s return, `END_LEVEL_TICK`.
+    End = 3,
+}
+
+/// A part of `dimension`'s tick on the mirror (`HorizonServer.levelPhase`).
+pub fn level_phase(dimension: &str, phase: LevelPhase) -> Result<(), String> {
+    with_server(|env, class| {
+        let dimension = env.new_string(dimension)?;
+        env.call_static_method(
+            class,
+            "levelPhase",
+            "(Ljava/lang/String;I)V",
+            &[JValue::Object(&dimension), JValue::Int(phase as i32)],
+        )?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// `dimension`'s block entities are about to tick: Horizon's items near players as they are now
+/// (the JSON of [`horizon_items`]), and those on or in mods' blocks touch them
+/// (`HorizonServer.levelItems`).
+pub fn level_items(dimension: &str, json: &str) -> Result<(), String> {
+    with_server(|env, class| {
+        let dimension = env.new_string(dimension)?;
+        let json = env.new_string(json)?;
+        env.call_static_method(
+            class,
+            "levelItems",
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            &[JValue::Object(&dimension), JValue::Object(&json)],
+        )?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// The mods' block entities at `positions` of `dimension`, ticked in that order (Horizon's block
+/// entity list reached their placeholders: `HorizonServer.levelBlockEntities`).
+pub fn level_block_entities(dimension: &str, positions: &[[i32; 3]]) -> Result<(), String> {
+    let flat: Vec<i32> = positions.iter().flatten().copied().collect();
+    with_server(|env, class| {
+        let dimension = env.new_string(dimension)?;
+        let array = env.new_int_array(flat.len() as sys::jsize)?;
+        env.set_int_array_region(&array, 0, &flat)?;
+        env.call_static_method(
+            class,
+            "levelBlockEntities",
+            "(Ljava/lang/String;[I)V",
+            &[JValue::Object(&dimension), JValue::Object(&array)],
+        )?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// A player's tick on the mirror (the mods' hooks in `ServerPlayer.tick` and the ticks it runs),
+/// from where Horizon ticks that player (`HorizonServer.playerTick`).
+pub fn player_tick(uuid: &str) -> Result<(), String> {
+    with_server(|env, class| {
+        let uuid = env.new_string(uuid)?;
+        env.call_static_method(
+            class,
+            "playerTick",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&uuid)],
+        )?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// The mirror's server tick ends, after Horizon's levels ticked (`HorizonServer.tickEnd`): the
+/// mods' entities, menus, screens, `END_SERVER_TICK`.
+pub fn tick_end() -> Result<(), String> {
+    with_server(|env, class| {
+        env.call_static_method(class, "tickEnd", "()V", &[])?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// Horizon updated the neighbours of `positions` of `dimension` beside Java mods' blocks: the
 /// mods' blocks hear it (`HorizonServer.neighbours`).
 pub fn neighbours(dimension: &str, positions: &[[i32; 3]]) -> Result<(), String> {

@@ -59,6 +59,13 @@ impl Game<'_> {
         None
     }
     pub(in crate::game) fn apply_java_level_writes(&mut self) {}
+    pub(in crate::game) fn java_level_start(&mut self) {}
+    pub(in crate::game) fn java_level_scheduled_ticks(&mut self) {}
+    pub(in crate::game) fn java_block_entities_start(&mut self) {}
+    pub(in crate::game) fn java_block_entities_end(&mut self) {}
+    /// No mod's block entity has a placeholder in the list: nothing is ever reached.
+    pub(in crate::game) fn java_tick_block_entities(&mut self, _reached: &mut Vec<[i32; 3]>) {}
+    pub(in crate::game) fn java_level_end(&mut self) {}
     pub(in crate::game) fn java_block_event(
         &mut self,
         _pos: [i32; 3],

@@ -247,6 +247,37 @@ pub(crate) fn surface(dimension: &str, x: i32, z: i32) -> Option<i32> {
         .and_then(|view| unsafe { (*view).surface(dimension, x, z) })
 }
 
+/// Mods' block entities that came up (true) or went, by dimension, in order, for the game's
+/// block entity list (a placeholder each: their ticks come in vanilla's order).
+static TICKERS: std::sync::Mutex<Vec<(String, [i32; 3], bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// A mod's block entity came up at `pos` of `dimension`, or went. Kept up to 1 << 16.
+pub(crate) fn block_entity_ticker(dimension: &str, pos: [i32; 3], up: bool) {
+    let mut tickers = TICKERS.lock().unwrap_or_else(|e| e.into_inner());
+    if tickers.len() < 1 << 16 {
+        tickers.push((dimension.to_owned(), pos, up));
+    }
+}
+
+/// The mods' block entities of `dimension` that came up (true) or went since last asked, in
+/// the order they did.
+pub fn take_block_entity_tickers(dimension: &str) -> Vec<([i32; 3], bool)> {
+    let mut tickers = TICKERS.lock().unwrap_or_else(|e| e.into_inner());
+    if tickers.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    tickers.retain(|(d, p, up)| {
+        if d == dimension {
+            out.push((*p, *up));
+            false
+        } else {
+            true
+        }
+    });
+    out
+}
+
 /// Chunks Horizon generated (not loaded from a save) since Java last asked, by dimension:
 /// `NaturalSpawner.spawnMobsForChunkGeneration` for the mods' mobs (`HorizonSpawner`).
 static FRESH: std::sync::Mutex<Vec<(String, i32, i32)>> = std::sync::Mutex::new(Vec::new());

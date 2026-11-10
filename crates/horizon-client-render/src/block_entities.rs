@@ -90,6 +90,10 @@ pub struct BlockEntities {
     /// Like `mods`, one taken out stays listed until `put` or `remove`.
     boxes: FxHashSet<Pos>,
     asleep: FxHashSet<Pos>,
+    /// Placeholders for block entities another simulation owns (a Java mod's, which the mods'
+    /// side ticks): each holds a slot in the ticker list, in the order it was made, with no
+    /// entry in the map, so the tick reaches it between Horizon's own in vanilla's order.
+    foreign: FxHashSet<Pos>,
 }
 
 /// A structure or test instance block: the block entities whose box the frame may draw.
@@ -379,6 +383,10 @@ impl BlockEntities {
         self.attachments.remove(pos);
         self.asleep.remove(pos);
         self.cancel(pos);
+        // A placeholder there (the copy Horizon held of another's block entity went) ticks on.
+        if self.foreign.contains(pos) {
+            self.add(*pos);
+        }
         let removed = self.map.remove(pos);
         if matches!(removed, Some(BlockEntity::Mod(_))) {
             forget_mod(&mut self.mods, *pos);
@@ -415,6 +423,10 @@ impl BlockEntities {
     /// the positions `gone` names and changes none it keeps, so those that
     /// sleep stay asleep (a moving player unloads chunks most ticks).
     pub fn unload(&mut self, mut gone: impl FnMut(&Pos) -> bool) {
+        let placeholders: Vec<Pos> = self.foreign.iter().filter(|p| gone(p)).copied().collect();
+        for p in &placeholders {
+            self.remove_foreign(p);
+        }
         let asleep = std::mem::take(&mut self.asleep);
         self.retain(|p, _| !gone(p));
         self.asleep = asleep;
@@ -445,6 +457,7 @@ impl BlockEntities {
         });
     }
     pub fn clear(&mut self) {
+        self.foreign.clear();
         self.attachments.clear();
         self.map.clear();
         self.mods.clear();
@@ -513,9 +526,10 @@ impl BlockEntities {
                 continue;
             }
             self.pending.remove(&pos);
+            let foreign = self.is_foreign(&pos);
             if self.live.contains_key(&pos)
-                || !self.map.contains_key(&pos)
-                || self.ticking(state(pos)) != Ticking::Yes
+                || !(foreign || self.map.contains_key(&pos))
+                || (!foreign && self.ticking(state(pos)) != Ticking::Yes)
             {
                 continue;
             }
@@ -532,19 +546,46 @@ impl BlockEntities {
             return Arc::clone(&self.tickers);
         }
         self.out.clear();
-        let (live, map) = (&mut self.live, &self.map);
+        let (live, map, foreign) = (&mut self.live, &self.map, &self.foreign);
+        let held = |p: &Pos| map.contains_key(p) || foreign.contains(p);
         Arc::make_mut(&mut self.tickers).retain(|(p, slot)| {
             let mine = live.get(p) == Some(slot);
-            if mine && !map.contains_key(p) {
+            if mine && !held(p) {
                 live.remove(p);
             }
-            mine && map.contains_key(p)
+            mine && held(p)
         });
         Arc::clone(&self.tickers)
     }
     /// Whether a slot from `tickers` still ticks.
     pub fn is_live(&self, (pos, slot): (Pos, u32)) -> bool {
-        self.live.get(&pos) == Some(&slot) && self.map.contains_key(&pos)
+        self.live.get(&pos) == Some(&slot) && self.holds(&pos)
+    }
+    /// A block entity at `pos`: Horizon's own or a placeholder (`add_foreign`).
+    fn holds(&self, pos: &Pos) -> bool {
+        self.map.contains_key(pos) || self.foreign.contains(pos)
+    }
+    /// A block entity another simulation owns came up at `pos` (`Level.addBlockEntity`): a
+    /// placeholder gets a slot in the ticker list at the next tick, after those already there
+    /// (a copy Horizon still holds there keeps its slot for it).
+    pub fn add_foreign(&mut self, pos: Pos) {
+        if self.foreign.insert(pos)
+            && !self.live.contains_key(&pos)
+            && !self.pending.contains_key(&pos)
+        {
+            self.add(pos);
+        }
+    }
+    /// The block entity another simulation owns at `pos` is gone: its slot is freed.
+    pub fn remove_foreign(&mut self, pos: &Pos) {
+        if self.foreign.remove(pos) && !self.map.contains_key(pos) {
+            self.cancel(pos);
+        }
+    }
+    /// Whether the ticker at `pos` is a placeholder (`add_foreign`), which the tick hands to
+    /// its owner instead of ticking.
+    pub fn is_foreign(&self, pos: &Pos) -> bool {
+        self.foreign.contains(pos) && !self.map.contains_key(pos)
     }
     /// Frees the slot at `pos` (the block entity stays).
     pub fn forget(&mut self, pos: &Pos) {
@@ -588,6 +629,31 @@ mod tests {
         assert!(b.is_asleep(&kept));
         b.retain(|_, _| true);
         assert!(!b.is_asleep(&kept));
+    }
+
+    /// Another simulation's block entities hold slots between Horizon's, in the order they were
+    /// made (vanilla's one list), whatever their block state; removed or unloaded, they go.
+    #[test]
+    fn placeholders_tick_in_the_order_they_were_made() {
+        let mut b = level();
+        let (h1, j1, h2, j2) = ((0, 64, 0), (0, 63, 0), (2, 64, 0), (40, 63, 0));
+        // Horizon's hoppers tick in state 1; the placeholders' blocks are air to Horizon.
+        let states: HashMap<Pos, u32> = [(h1, 1), (h2, 1)].into_iter().collect();
+        b.insert(h1, hopper());
+        b.add_foreign(j1);
+        b.insert(h2, hopper());
+        b.add_foreign(j2);
+        assert_eq!(order(&mut b, &states), vec![h1, j1, h2, j2]);
+        assert!(b.is_foreign(&j1) && !b.is_foreign(&h1));
+        assert!(b.get(&j1).is_none());
+        // Up again (a repeat) keeps its slot; one made later goes last.
+        b.add_foreign(j1);
+        b.remove_foreign(&j1);
+        b.add_foreign(j1);
+        assert_eq!(order(&mut b, &states), vec![h1, h2, j2, j1]);
+        b.unload(|p| p.0 >> 4 == 2);
+        assert_eq!(order(&mut b, &states), vec![h1, h2, j1]);
+        assert!(!b.is_foreign(&j2));
     }
 
     fn near(b: &BlockEntities, x: f64, z: f64, radius: f64) -> Vec<Pos> {

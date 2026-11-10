@@ -5292,6 +5292,8 @@ impl Game<'_> {
         if !debug {
             self.tick_scheduled()?;
         }
+        // The Java mods' blocks' and fluids' scheduled ticks (none without them).
+        self.java_level_scheduled_ticks();
         self.with_level(|b, level, ticks| {
             horizon_client::spans::time("random_ticks", || {
                 for (x, z) in ticking.into_iter().filter(|_| !debug) {
@@ -7954,6 +7956,8 @@ impl Game<'_> {
     /// What the tick runs after the local player's own update: effects, the
     /// world's entities and blocks, and the network hub.
     fn tick_world(&mut self, running: bool) -> Result<()> {
+        // The Java mods' START_LEVEL_TICK and ServerLevel.tick's head (none without them).
+        self.java_level_start();
         // Entities added since the last tick join the level before it ticks.
         self.native_joins_flush(false, 0);
         self.share_spawn_conditions();
@@ -8128,6 +8132,8 @@ impl Game<'_> {
         if running {
             horizon_client::spans::time("lan_note_joined", || self.lan_note_joined());
         }
+        // The Java mods' ServerLevel.tick return and END_LEVEL_TICK.
+        self.java_level_end();
         Ok(())
     }
     /// Keep the held-key state of toggled sneak and sprint in step with their mapping.

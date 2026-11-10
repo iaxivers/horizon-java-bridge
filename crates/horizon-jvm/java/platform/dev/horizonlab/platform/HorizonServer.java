@@ -1059,14 +1059,23 @@ public final class HorizonServer {
      */
     private static void playerMotionsBefore() {
         MOTION_BEFORE.clear();
+        // Once a tick, from where Horizon moved each player since the last; the tick's later runs
+        // of block entities (Horizon's list, phased) start from what the earlier ones made.
+        boolean first = MOTIONS_TICK != currentTick;
+        MOTIONS_TICK = currentTick;
         for (ServerPlayer player : PLAYERS) {
-            Vec3 at = player.position();
-            Vec3 last = LAST_POSITION.put(player.getUUID(), at);
-            Vec3 motion = last == null || last.distanceToSqr(at) > 100 ? Vec3.ZERO : at.subtract(last);
-            player.setDeltaMovement(motion);
+            if (first) {
+                Vec3 at = player.position();
+                Vec3 last = LAST_POSITION.put(player.getUUID(), at);
+                Vec3 motion = last == null || last.distanceToSqr(at) > 100 ? Vec3.ZERO : at.subtract(last);
+                player.setDeltaMovement(motion);
+            }
             MOTION_BEFORE.put(player.getUUID(), player.getDeltaMovement());
         }
     }
+
+    /** The tick whose players' motions were last taken from their moves (playerMotionsBefore). */
+    private static long MOTIONS_TICK = Long.MIN_VALUE;
 
     /**
      * After: a player whose motion a mod's block entity set (Create's fan blowing at it, its
@@ -1523,7 +1532,8 @@ public final class HorizonServer {
             }
             throw e;
         } finally {
-            tickTime(tick, System.nanoTime() - started);
+            if (phased) lastStart = System.nanoTime() - started;
+            else tickTime(tick, System.nanoTime() - started);
         }
     }
 
@@ -1612,10 +1622,14 @@ public final class HorizonServer {
         // Their held uses of mods' items (LivingEntity.tick's updatingUsingItem: sandpaper).
         for (ServerPlayer p : BY_UUID.values()) tickUse(p);
         fireEach("ServerTickEvents.START_SERVER_TICK", ServerTickEvents.START_SERVER_TICK, l -> l.onStartTick(server));
-        for (ServerLevel level : new ArrayList<>(LEVELS.values())) {
-            fireEach("ServerTickEvents.START_LEVEL_TICK", ServerTickEvents.START_LEVEL_TICK, l -> l.onStartTick(level));
-            hook(level, ServerLevel.class, "tick", TICK_SERVER, "HEAD", haveTime);
-        }
+        // A new tick: nothing of it has run per level or per player yet.
+        LEVELS_STARTED.clear();
+        LEVELS_ENDED.clear();
+        PLAYERS_TICKED.clear();
+        HorizonBlockEntities.newTick();
+        // Horizon drives the levels' parts (levelPhase, levelBlockEntities, playerTick) from
+        // inside its own level ticks; unphased, they all run here, as before.
+        if (!phased) for (ServerLevel level : new ArrayList<>(LEVELS.values())) levelStart(level);
 
         closeForwarded();
         currentTick = tick;
@@ -1734,49 +1748,211 @@ public final class HorizonServer {
         }
 
         phase = HorizonProfile.add("players and events", phase);
-        for (ServerLevel level : new ArrayList<>(LEVELS.values())) {
-            hook(level, ServerLevel.class, "tick", TICK_SERVER, "RETURN", haveTime);
-            hook(level, ServerLevel.class, "tick", TICK_SERVER, "TAIL", haveTime);
-            fireEach("ServerTickEvents.END_LEVEL_TICK", ServerTickEvents.END_LEVEL_TICK, l -> l.onEndTick(level));
-        }
-        phase = HorizonProfile.add("level tick hooks", phase);
+        // MinecraftServer.tickChildren: the functions before any level.
         HorizonFunctions.tick(server, server.getWorldData().overworldData().getGameTime());
         phase = HorizonProfile.add("functions", phase);
-        // Each player's tick (ServerPlayer.tick, Player.tick from doTick), as vanilla's
-        // levels and connections run them within the server's tick, with the ticks Player.tick
-        // runs inside it (super.tick(): LivingEntity.tick, then Entity.tick) nested as they are:
-        // TACZ ticks a player's guns (drawing, cool-downs, reloads) at LivingEntity.tick's end.
-        for (ServerPlayer player : new ArrayList<>(PLAYERS)) {
-            hook(player, ServerPlayer.class, "tick", "()V", "HEAD", NO_ARGUMENTS);
-            hook(player, net.minecraft.world.entity.player.Player.class, "tick", "()V", "HEAD", NO_ARGUMENTS);
-            hook(player, net.minecraft.world.entity.LivingEntity.class, "tick", "()V", "HEAD", NO_ARGUMENTS);
-            hook(player, net.minecraft.world.entity.Entity.class, "tick", "()V", "HEAD", NO_ARGUMENTS);
-            hook(player, net.minecraft.world.entity.Entity.class, "tick", "()V", "RETURN", NO_ARGUMENTS);
-            hook(player, net.minecraft.world.entity.Entity.class, "tick", "()V", "TAIL", NO_ARGUMENTS);
-            hook(player, net.minecraft.world.entity.LivingEntity.class, "tick", "()V", "RETURN", NO_ARGUMENTS);
-            hook(player, net.minecraft.world.entity.LivingEntity.class, "tick", "()V", "TAIL", NO_ARGUMENTS);
-            hook(player, net.minecraft.world.entity.player.Player.class, "tick", "()V", "RETURN", NO_ARGUMENTS);
-            hook(player, net.minecraft.world.entity.player.Player.class, "tick", "()V", "TAIL", NO_ARGUMENTS);
-            hook(player, ServerPlayer.class, "tick", "()V", "RETURN", NO_ARGUMENTS);
-            hook(player, ServerPlayer.class, "tick", "()V", "TAIL", NO_ARGUMENTS);
+        if (phased) {
+            syncInventories();
+            return;
         }
-        phase = HorizonProfile.add("player tick hooks", phase);
-        // Mod blocks' scheduled ticks and block entities, as their levels' ticks run them.
-        // A frozen world (`/tick freeze`) runs none of these, as vanilla's levels don't
-        // (ServerLevel.tick and Level.tickBlockEntities ask runsNormally()).
-        for (ServerLevel level : running ? new ArrayList<>(LEVELS.values()) : List.<ServerLevel>of()) {
-            if (level.getBlockTicks() instanceof HorizonTicks<?> ticks) ticks.run(level);
-            // The mods' fluids flow here (HorizonTicks: their scheduled fluid ticks).
-            if (level.getFluidTicks() instanceof HorizonTicks<?> ticks) ticks.run(level);
-        }
-        phase = HorizonProfile.add("scheduled ticks", phase);
         // Horizon's items on and in the mods' blocks (HorizonItems: a depot catching one).
         HorizonItems.touchBlocks();
+        for (ServerLevel level : new ArrayList<>(LEVELS.values())) {
+            levelTicks(level);
+            levelBlockEntities(level, null);
+            levelEnd(level);
+        }
+        phase = HorizonProfile.add("levels", phase);
+        tickEnd(phase);
+    }
+
+    /** Horizon drives the levels' parts of the tick (levelPhase, from its own level ticks). */
+    private static volatile boolean phased;
+
+    /** Whether Horizon drives the levels' parts of the next ticks ({@code phased}). */
+    public static void phased(boolean on) {
+        phased = on;
+    }
+
+    /** The levels whose tick started this server tick (levelStart). */
+    private static final java.util.Set<ServerLevel> LEVELS_STARTED = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    /** The levels whose tick ended this server tick (levelEnd). */
+    private static final java.util.Set<ServerLevel> LEVELS_ENDED = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    /** The players whose tick hooks ran this server tick (playerTick). */
+    private static final java.util.Set<ServerPlayer> PLAYERS_TICKED = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+
+    /**
+     * A part of a level's tick, called by Horizon from inside its own tick of that level (Horizon
+     * ticks only the levels it keeps running, as vanilla's levels with nothing loaded do nothing):
+     * 0 its start (START_LEVEL_TICK, ServerLevel.tick's head), 1 the mods' scheduled block and
+     * fluid ticks (after Horizon's own), 2 its block entities' end (what the mods did to Horizon's
+     * items, reported: HorizonItems.report), 3 its end (ServerLevel.tick's return,
+     * END_LEVEL_TICK). Its block entities are Horizon's list's (levelBlockEntities), after
+     * levelItems.
+     */
+    public static void levelPhase(String dimension, int part) {
+        Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
+        if (server == null || !started) return;
+        ServerLevel level = level(dimension);
+        if (level == null) return;
+        long phase = HorizonProfile.start();
+        try {
+            switch (part) {
+                case 0 -> levelStart(level);
+                case 1 -> levelTicks(level);
+                case 2 -> HorizonItems.report();
+                case 3 -> levelEnd(level);
+                default -> { }
+            }
+            syncInventories();
+        } finally {
+            HorizonProfile.add(part == 1 ? "scheduled ticks" : "level tick hooks", phase);
+        }
+    }
+
+    /**
+     * A level's block entities are about to tick (Horizon moved its items this tick): Horizon's
+     * items near players as they are now (HorizonItems.update), then each on or in a mod's block
+     * touches it (HorizonItems.touchBlocks: a depot catching one, crushing wheels pulling one in),
+     * as vanilla's item ticks come before the level's block entities.
+     */
+    public static void levelItems(String dimension, String json) {
+        Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
+        if (server == null || !started) return;
+        long phase = HorizonProfile.start();
+        HorizonItems.update(json);
+        if (running) HorizonItems.touchBlocks();
+        syncInventories();
+        HorizonProfile.add("items", phase);
+    }
+
+    /**
+     * Mods' block entities of a level in the order Horizon's block entity list holds them (one
+     * placeholder each, between Horizon's own: vanilla's Level.blockEntityTickers, in the order
+     * they were made), ticked from Horizon's own block entity tick as it reaches them.
+     */
+    public static void levelBlockEntities(String dimension, int[] positions) {
+        Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
+        if (server == null || !started) return;
+        ServerLevel level = level(dimension);
+        if (level == null) return;
+        long phase = HorizonProfile.start();
+        levelBlockEntities(level, positions);
+        // What they changed of Horizon's block entities (a chest a chute filled) goes back now:
+        // Horizon's next block entity (a hopper) sees it, as in one vanilla level.
+        syncInventories();
+        HorizonProfile.add("block entities", phase);
+    }
+
+    private static void levelStart(ServerLevel level) {
+        if (!LEVELS_STARTED.add(level)) return;
+        Object[] haveTime = {(java.util.function.BooleanSupplier) () -> true};
+        fireEach("ServerTickEvents.START_LEVEL_TICK", ServerTickEvents.START_LEVEL_TICK, l -> l.onStartTick(level));
+        hook(level, ServerLevel.class, "tick", TICK_SERVER, "HEAD", haveTime);
+    }
+
+    /**
+     * The mods' scheduled block and fluid ticks of a level, as ServerLevel.tick runs them. A
+     * frozen world (`/tick freeze`) runs none, as vanilla's levels don't (runsNormally()).
+     */
+    private static void levelTicks(ServerLevel level) {
+        if (!running) return;
+        if (level.getBlockTicks() instanceof HorizonTicks<?> ticks) ticks.run(level);
+        // The mods' fluids flow here (HorizonTicks: their scheduled fluid ticks).
+        if (level.getFluidTicks() instanceof HorizonTicks<?> ticks) ticks.run(level);
+    }
+
+    /**
+     * A level's mod block entities (Level.tickBlockEntities): those at {@code positions} in that
+     * order, or with null the ones not ticked yet this tick, in the order they were made. A
+     * frozen world ticks none.
+     */
+    private static void levelBlockEntities(ServerLevel level, int[] positions) {
+        if (!running) return;
         playerMotionsBefore();
-        if (running) HorizonBlockEntities.tick();
-        else HorizonBlockEntities.frozenTick();
+        if (positions == null) HorizonBlockEntities.tickRest(level);
+        else HorizonBlockEntities.tickOrdered(level, positions);
         playerMotionsAfter();
-        phase = HorizonProfile.add("block entities", phase);
+    }
+
+    private static void levelEnd(ServerLevel level) {
+        if (!LEVELS_STARTED.contains(level) || !LEVELS_ENDED.add(level)) return;
+        Object[] haveTime = {(java.util.function.BooleanSupplier) () -> true};
+        hook(level, ServerLevel.class, "tick", TICK_SERVER, "RETURN", haveTime);
+        hook(level, ServerLevel.class, "tick", TICK_SERVER, "TAIL", haveTime);
+        fireEach("ServerTickEvents.END_LEVEL_TICK", ServerTickEvents.END_LEVEL_TICK, l -> l.onEndTick(level));
+    }
+
+    /**
+     * A player's tick (ServerPlayer.tick, Player.tick from doTick), called by Horizon where it
+     * ticks the player, with the ticks Player.tick runs inside it (super.tick(): LivingEntity.tick,
+     * then Entity.tick) nested as they are: TACZ ticks a player's guns (drawing, cool-downs,
+     * reloads) at LivingEntity.tick's end. Once a server tick; tickEnd runs those Horizon didn't.
+     */
+    public static void playerTick(String uuid) {
+        Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
+        if (server == null || !started) return;
+        ServerPlayer player;
+        try {
+            player = BY_UUID.get(UUID.fromString(uuid));
+        } catch (IllegalArgumentException e) {
+            return;
+        }
+        if (player == null) return;
+        long phase = HorizonProfile.start();
+        playerTickHooks(player);
+        syncInventories();
+        HorizonProfile.add("player tick hooks", phase);
+    }
+
+    private static void playerTickHooks(ServerPlayer player) {
+        if (!PLAYERS_TICKED.add(player)) return;
+        hook(player, ServerPlayer.class, "tick", "()V", "HEAD", NO_ARGUMENTS);
+        hook(player, net.minecraft.world.entity.player.Player.class, "tick", "()V", "HEAD", NO_ARGUMENTS);
+        hook(player, net.minecraft.world.entity.LivingEntity.class, "tick", "()V", "HEAD", NO_ARGUMENTS);
+        hook(player, net.minecraft.world.entity.Entity.class, "tick", "()V", "HEAD", NO_ARGUMENTS);
+        hook(player, net.minecraft.world.entity.Entity.class, "tick", "()V", "RETURN", NO_ARGUMENTS);
+        hook(player, net.minecraft.world.entity.Entity.class, "tick", "()V", "TAIL", NO_ARGUMENTS);
+        hook(player, net.minecraft.world.entity.LivingEntity.class, "tick", "()V", "RETURN", NO_ARGUMENTS);
+        hook(player, net.minecraft.world.entity.LivingEntity.class, "tick", "()V", "TAIL", NO_ARGUMENTS);
+        hook(player, net.minecraft.world.entity.player.Player.class, "tick", "()V", "RETURN", NO_ARGUMENTS);
+        hook(player, net.minecraft.world.entity.player.Player.class, "tick", "()V", "TAIL", NO_ARGUMENTS);
+        hook(player, ServerPlayer.class, "tick", "()V", "RETURN", NO_ARGUMENTS);
+        hook(player, ServerPlayer.class, "tick", "()V", "TAIL", NO_ARGUMENTS);
+    }
+
+    /**
+     * The server tick's end, after Horizon's levels ticked (phased): what no level tick ran
+     * (a level Horizon didn't reach ends its tick here), the players' tick hooks Horizon didn't
+     * run, the mods' entities and spawner, menus and screens, END_SERVER_TICK.
+     */
+    public static void tickEnd() {
+        Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
+        if (server == null || !started || !phased) return;
+        long began = System.nanoTime();
+        try {
+            tickEnd(HorizonProfile.start());
+        } catch (RuntimeException | Error e) {
+            if (TICK_FAILURES.add(e.getClass().getName())) {
+                java.io.StringWriter trace = new java.io.StringWriter();
+                e.printStackTrace(new java.io.PrintWriter(trace));
+                Natives.log("Java mods: a tick's end failed: " + trace);
+            }
+            throw e;
+        } finally {
+            tickTime(currentTick, lastStart + System.nanoTime() - began);
+        }
+    }
+
+    private static void tickEnd(long phase) {
+        MinecraftServer server = HorizonServer.server;
+        Object[] haveTime = {(java.util.function.BooleanSupplier) () -> true};
+        // A level whose tick Horizon left early (an error) ends here.
+        for (ServerLevel level : new ArrayList<>(LEVELS_STARTED)) levelEnd(level);
+        for (ServerPlayer player : new ArrayList<>(PLAYERS)) playerTickHooks(player);
+        phase = HorizonProfile.add("player tick hooks", phase);
+        if (!running) HorizonBlockEntities.frozenTick();
+        else HorizonBlockEntities.restoreSometimes();
         HorizonChunkLoads.tick();
         HorizonTickets.tick(new ArrayList<>(LEVELS.values()));
         HorizonSavedData.tick();
@@ -1814,6 +1990,9 @@ public final class HorizonServer {
         HorizonProfile.add("sync", phase);
         HorizonProfile.tick();
     }
+
+    /** The Java time of this tick's start (tick), counted into the tick's time at its end. */
+    private static long lastStart;
 
     /**
      * A mod moved a mirrored player: the mirror is there now, and Horizon is told to move the

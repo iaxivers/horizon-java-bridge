@@ -3798,6 +3798,9 @@ impl Game<'_> {
                 self.guest_die(host, gi, conn);
                 continue;
             }
+            // ServerPlayer.doTick: the Java mods' hooks in the player's tick (none without them).
+            let uuid = host.hub.guests[gi].uuid;
+            self.java_player_tick(host, uuid);
             let play = host.play.entry(conn).or_default();
             // ServerGamePacketListenerImpl.tick's dropSpamThrottler.
             play.creative_drops = play.creative_drops.saturating_sub(1);

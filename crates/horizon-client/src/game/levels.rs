@@ -536,6 +536,8 @@ impl Game<'_> {
             self.native_lifecycle.cancel_server_tick();
         }
         result?;
+        // The Java mods' server tick ends after every level's (none without them).
+        self.java_tick_end();
         if let Err(error) = self.close_idle_levels() {
             self.native_lifecycle.cancel_server_tick();
             return Err(error);

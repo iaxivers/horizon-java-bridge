@@ -115,6 +115,7 @@ public final class HorizonBlockEntities {
         if (made == null) return null;
         made.setLevel(level);
         live.put(key, made);
+        up(level, pos, made);
         mark(level, pos);
         loaded(level, made);
         return made;
@@ -301,6 +302,8 @@ public final class HorizonBlockEntities {
         Map<Long, BlockEntity> live = liveMap((ServerLevel) level);
         BlockEntity old = live.put(be.getBlockPos().asLong(), be);
         if (old != null && old != be) old.setRemoved();
+        // One replacing another keeps its place (RebindableTickingBlockEntityWrapper).
+        if (old == null) up(level, be.getBlockPos(), be);
         be.setLevel(level);
         mark(level, be.getBlockPos());
     }
@@ -311,6 +314,7 @@ public final class HorizonBlockEntities {
         BlockEntity be = live == null ? null : live.remove(pos.asLong());
         if (be != null) {
             be.setRemoved();
+            down(level, pos);
             unloaded(level, be);
         }
         saved(level).remove(pos.asLong());
@@ -401,13 +405,12 @@ public final class HorizonBlockEntities {
         }
     }
 
-    /** Each tick, before mods' block entities run: the copies read again from Horizon. */
-    private static void refreshVanilla() {
-        for (Map.Entry<ServerLevel, Map<Long, Copy>> e : COPIES.entrySet()) {
-            Map<Long, Copy> copies = e.getValue();
-            for (Copy copy : new ArrayList<>(copies.values())) {
-                if (!copy.changed) refresh(e.getKey(), copy.be.getBlockPos(), copies, copy);
-            }
+    /** Each tick, before a level's mod block entities run: its copies read again from Horizon. */
+    private static void refreshVanilla(ServerLevel level) {
+        Map<Long, Copy> copies = COPIES.get(level);
+        if (copies == null) return;
+        for (Copy copy : new ArrayList<>(copies.values())) {
+            if (!copy.changed) refresh(level, copy.be.getBlockPos(), copies, copy);
         }
     }
 
@@ -442,38 +445,105 @@ public final class HorizonBlockEntities {
         if (++ticks % 20 == 0) restore();
     }
 
-    /** Each server tick: the tickers run; gone blocks drop, unloaded ones are put away. */
-    public static synchronized void tick() {
-        refreshVanilla();
-        // A ticker's writes are made at once (HorizonServer.setBlock): a block entity they make
-        // ticks from the next tick, one they remove ticks no more, as vanilla's pending tickers.
-        for (Map.Entry<ServerLevel, Map<Long, BlockEntity>> e : new ArrayList<>(LIVE.entrySet())) {
-            ServerLevel level = e.getKey();
-            Map<Long, BlockEntity> live = e.getValue();
+    /** Those ticked this server tick (Horizon's order first, the rest after: tickRest). */
+    private static final java.util.Set<BlockEntity> TICKED = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    /** Made while a level's block entities ran: they tick from the next tick, as vanilla's pending ones. */
+    private static final java.util.Set<BlockEntity> BORN = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    /** The levels whose copies of Horizon's block entities were read again this tick. */
+    private static final java.util.Set<ServerLevel> REFRESHED = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    /** A level's block entities are ticking (what is made meanwhile waits: BORN). */
+    private static boolean ticking;
+
+    /** A server tick starts: nothing of it has ticked yet. */
+    public static synchronized void newTick() {
+        TICKED.clear();
+        BORN.clear();
+        REFRESHED.clear();
+    }
+
+    /** Each server tick of a running world: saved ones whose chunks came come up every 20. */
+    public static synchronized void restoreSometimes() {
+        if (++ticks % 20 == 0) restore();
+    }
+
+    /**
+     * A level's mod block entities at {@code positions}, in that order (Horizon's block entity
+     * list, where each has a placeholder between Horizon's own: vanilla's one list, in the
+     * order they were made). Each ticks once a server tick.
+     */
+    public static synchronized void tickOrdered(ServerLevel level, int[] positions) {
+        Map<Long, BlockEntity> live = LIVE.get(level);
+        if (live == null) return;
+        startTicking(level);
+        try {
+            String dimension = level.dimension().identifier().toString();
+            for (int i = 0; i + 2 < positions.length; i += 3) {
+                long key = BlockPos.asLong(positions[i], positions[i + 1], positions[i + 2]);
+                BlockEntity be = live.get(key);
+                if (be != null) tickOne(level, dimension, live, key, be);
+            }
+        } finally {
+            ticking = false;
+        }
+    }
+
+    /**
+     * A level's mod block entities in the order they were made, those not ticked yet this tick:
+     * the unphased tick (Horizon's list holds them otherwise).
+     */
+    public static synchronized void tickRest(ServerLevel level) {
+        Map<Long, BlockEntity> live = LIVE.get(level);
+        if (live == null) return;
+        startTicking(level);
+        try {
             String dimension = level.dimension().identifier().toString();
             for (Map.Entry<Long, BlockEntity> entry : new ArrayList<>(live.entrySet())) {
-                BlockEntity be = entry.getValue();
-                if (be.isRemoved() || live.get(entry.getKey()) != be) continue;
-                BlockPos pos = be.getBlockPos();
-                String name = Natives.blockState(dimension, pos.getX(), pos.getY(), pos.getZ());
-                if (name == null) {
-                    // Horizon unloaded its chunk: put away until a mod asks again.
-                    saved(level).put(entry.getKey(), be.saveWithFullMetadata(level.registryAccess()));
-                    live.remove(entry.getKey());
-                    be.setRemoved();
-                    unloaded(level, be);
-                    continue;
-                }
-                BlockState state = HorizonServer.blockState(level, pos);
-                if (!be.getType().isValid(state)) {
-                    remove(level, live, entry.getKey(), be, true);
-                    continue;
-                }
-                if (be.getBlockState() != state) be.setBlockState(state);
-                tick(level, pos, state, be);
+                if (BORN.contains(entry.getValue())) continue;
+                tickOne(level, dimension, live, entry.getKey(), entry.getValue());
             }
+        } finally {
+            ticking = false;
         }
-        if (++ticks % 20 == 0) restore();
+    }
+
+    private static void startTicking(ServerLevel level) {
+        if (REFRESHED.add(level)) refreshVanilla(level);
+        ticking = true;
+    }
+
+    /** One block entity's tick: gone blocks drop it, an unloaded chunk puts it away. */
+    private static void tickOne(ServerLevel level, String dimension, Map<Long, BlockEntity> live, long key, BlockEntity be) {
+        // A ticker's writes are made at once (HorizonServer.setBlock): one they removed ticks no more.
+        if (be.isRemoved() || live.get(key) != be || !TICKED.add(be)) return;
+        BlockPos pos = be.getBlockPos();
+        String name = Natives.blockState(dimension, pos.getX(), pos.getY(), pos.getZ());
+        if (name == null) {
+            // Horizon unloaded its chunk: put away until a mod asks again.
+            saved(level).put(key, be.saveWithFullMetadata(level.registryAccess()));
+            live.remove(key);
+            be.setRemoved();
+            down(level, pos);
+            unloaded(level, be);
+            return;
+        }
+        BlockState state = HorizonServer.blockState(level, pos);
+        if (!be.getType().isValid(state)) {
+            remove(level, live, key, be, true);
+            return;
+        }
+        if (be.getBlockState() != state) be.setBlockState(state);
+        tick(level, pos, state, be);
+    }
+
+    /** A block entity came up: made while a level's block entities tick, it waits (BORN). Horizon holds a placeholder. */
+    private static void up(Level level, BlockPos pos, BlockEntity be) {
+        if (ticking) BORN.add(be);
+        Natives.blockEntityTicker(level.dimension().identifier().toString(), pos.getX(), pos.getY(), pos.getZ(), true);
+    }
+
+    /** A block entity went: Horizon's placeholder goes. */
+    private static void down(Level level, BlockPos pos) {
+        Natives.blockEntityTicker(level.dimension().identifier().toString(), pos.getX(), pos.getY(), pos.getZ(), false);
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -490,6 +560,7 @@ public final class HorizonBlockEntities {
 
     private static void remove(Level level, Map<Long, BlockEntity> live, long key, BlockEntity be, boolean drop) {
         live.remove(key);
+        down(level, be.getBlockPos());
         if (drop && be instanceof Container container) {
             Containers.dropContents(level, be.getBlockPos(), container);
         }

@@ -143,6 +143,12 @@ public final class Natives {
     /** The chunks of the dimension Horizon generated since the last call: cx, cz pairs. */
     public static native int[] freshChunks(String dimension);
 
+    /**
+     * A mod's block entity came up at x y z of a dimension (up), or went: Horizon keeps a
+     * placeholder for it in its block entity list, so its tick comes in vanilla's order.
+     */
+    public static native void blockEntityTicker(String dimension, int x, int y, int z, boolean up);
+
     /** A mod set a block of a mirrored level Horizon can't write now: queued, made after the call. */
     public static native void setBlock(String dimension, int x, int y, int z, String state);
 

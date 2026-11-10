@@ -17,6 +17,8 @@ impl Game<'_> {
         false
     }
     pub(in crate::game) fn tick_java_server(&mut self) {}
+    pub(in crate::game) fn java_tick_end(&mut self) {}
+    pub(in crate::game) fn java_player_tick(&mut self, _host: &mut LanHost, _uuid: u128) {}
     pub(in crate::game) fn save_java_mods(&mut self) {}
     pub(in crate::game) fn java_world_closing(&mut self) {}
     pub(in crate::game) fn java_player_chat(&mut self, _who: Who, _text: &str) {}

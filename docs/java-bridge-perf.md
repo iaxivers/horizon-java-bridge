@@ -349,3 +349,45 @@ Fixed in `bridge-benchfix` (each shows as 0 in the harness now):
   wait until the area answers (`setblock` → "That position is not loaded" until then).
 - `pause-when-empty-seconds=0` or vanilla's server stops ticking a minute after the last player.
 - 26.3's `/time query gametime` says "The game time is N tick(s)".
+
+## Synchronous writes and the tick in Horizon's (2026-11-10, bridge-sync)
+
+Step 1 (`5217f8390d`): a mod's `Level.setBlock` is made in Horizon's world inside its Java call
+(`Natives.setBlockNow`), with the mod's flags and vanilla's cascade; the queue and Java's overlay
+are left for writes Horizon can't make now. Step 2: the mirror's tick runs inside Horizon's (level
+parts inside each level's tick, mods' block entities from Horizon's block entity list in the
+order they were made, players' hooks in the player tick, the end after every level). See
+java-bridge.md "How a tick flows".
+
+Same cloud box (2 cores, no GPU), Fabric API 0.165.0 + Create Fly 6.0.9 unofficial 3, the default
+scenario with 60 s of items and 60 s of exploring, the headless client on, the box otherwise idle
+(after a restart; earlier runs the same day shared the 2 cores with stray games and are not
+comparable):
+
+| Horizon side | Base (`b12066ce88`) | Steps 1+2 (bridge-sync) |
+|---|---|---|
+| MSPT avg / P50 / P95 / P99, items running | 2.9 / 2.6 / 4.4 / 27.7 | 3.4 / 3.1 / 5.1 / 43.1 |
+| MSPT avg / P50 / P95 / P99, exploring | 17.8 / 15.8 / 36.7 / 67.8 | 20.7 / 18.9 / 42.1 / 571.9 |
+| Real Fabric's items / exploring avg, same run | 0.7 / 13.9 | 0.9 / 13.6 |
+| Peak RSS (MB) | 1893 | 1788 |
+| Parity diffs (200 ticks, 792 block entities) | 0 | 0 |
+| Save check, cross-open in real Fabric | OK, OK | OK, OK |
+
+(Steps 1+2 measured before the last two fixes of step 2, items around each level's block
+entities and the players' motions once a tick, which this scenario doesn't exercise; the run
+after them, on a box shared with leftover games, also gave 0 parity diffs, save and cross-open OK.)
+
+Regression run (`regress.py` direct owner keys fov pot hud createpump createfan createitemsin
+maps-client-only placed contraption createclick hoppers): all pass but `createclick`'s station
+checks (as on the base). `keys`, `fov` and `createfan` failed once each while earlier cases'
+games were still exiting (archiving their classes) on the 2 cores, and passed run again; the fan
+pushed the player 1.36 blocks (base binary, same box: 0.92).
+
+Reading it: about +0.5 ms a tick with items running. That is the phased tick's calls: one Java
+call per run of mods' block entities between Horizon's own (24 chute lines interleaved with their
+hoppers: ~25 calls a tick here, each lending the world, ending with `syncInventories`, and Horizon
+applying its actions), plus the level and player parts. The writes themselves cost nothing
+measurable (this scenario writes few blocks). Exploring moves within the noise but for one P99
+window. Cheap next steps if it matters: skip `syncInventories`/`apply_java_actions` after a run
+that changed nothing; merge the runs of a level whose Horizon block entities between them don't
+touch the mods' (they rarely do).

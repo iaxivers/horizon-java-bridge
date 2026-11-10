@@ -19,6 +19,12 @@ pub(in crate::game) struct JavaServerState {
     /// The connection a Java mod's level event being played now leaves out (its source
     /// player's: `Action::LevelEvent`'s `except`), for `lan_record_events`.
     pub(super) event_except: Option<u32>,
+    /// The mirror's server tick started this server tick (`tick_java_server`): its level parts
+    /// run inside Horizon's level ticks and it ends after them (`java_tick_end`).
+    pub(super) tick_started: bool,
+    /// The players as this tick's start told the mirror (for the items near them, again before
+    /// each level's block entities).
+    pub(super) tick_players: Vec<horizon_jvm::events::Player>,
 }
 
 /// A player on this game's server as the Java mods see them.
@@ -444,6 +450,7 @@ impl Game<'_> {
         // world (whole sections, HorizonServer.section) serves it too.
         let neighbours = self.java_neighbours_json(&players);
         let items = self.java_items_json(&players);
+        self.mods.java.tick_players = players.clone();
         // Players' `textures` (the profiles they logged in with) the mods' client hasn't
         // yet: their skins, for what mods build from them (3D skin layers).
         let textures: Vec<(String, String, Option<String>)> = {
@@ -464,7 +471,7 @@ impl Game<'_> {
                 })
                 .collect()
         };
-        let (ticked, entities) = self.with_java_world(|| {
+        let ticked = self.with_java_world(|| {
             for (uuid, value, signature) in &textures {
                 if let Err(e) =
                     horizon_jvm::events::profile_textures(uuid, value, signature.as_deref())
@@ -493,21 +500,20 @@ impl Game<'_> {
             {
                 log::warn!("Java mods: the client's packets not passed: {e}");
             }
-            let ticked = horizon_jvm::events::game_time(game_time, seed, running).and_then(|()| {
-                horizon_jvm::events::server_tick(ticks, dedicated, &root, &players, &events)
-            });
-            let entities = java_mods_on().then(horizon_jvm::events::entities);
-            (ticked, entities)
+            // The tick's start only: its level parts run inside Horizon's level ticks
+            // (java_server/phases.rs), its end after them (java_tick_end).
+            let ticked = horizon_jvm::events::phased(true)
+                .and_then(|()| horizon_jvm::events::game_time(game_time, seed, running))
+                .and_then(|()| {
+                    horizon_jvm::events::server_tick(ticks, dedicated, &root, &players, &events)
+                });
+            ticked
         });
-        if let Err(e) = ticked {
-            log::warn!("Java mods: a tick failed: {e}");
+        match ticked {
+            Ok(()) => self.mods.java.tick_started = true,
+            Err(e) => log::warn!("Java mods: a tick failed: {e}"),
         }
         self.apply_java_actions(None);
-        match entities {
-            Some(Ok(json)) => self.send_java_entities(&json),
-            Some(Err(e)) => log::warn!("Java mods: their entities could not be read: {e}"),
-            None => {}
-        }
     }
 
     /// Sends what the Java mods asked since the last call: system messages to a player or

@@ -103,6 +103,8 @@ mod items;
 #[cfg(feature = "java-mods")]
 mod menus;
 #[cfg(feature = "java-mods")]
+mod phases;
+#[cfg(feature = "java-mods")]
 mod players;
 #[cfg(feature = "java-mods")]
 mod saves;

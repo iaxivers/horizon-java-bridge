@@ -861,6 +861,11 @@ fn boot(env: &mut JNIEnv, jars: &[PathBuf]) -> jni::errors::Result<String> {
                 fn_ptr: native_set_block as *mut c_void,
             },
             NativeMethod {
+                name: "blockEntityTicker".into(),
+                sig: "(Ljava/lang/String;IIIZ)V".into(),
+                fn_ptr: native_block_entity_ticker as *mut c_void,
+            },
+            NativeMethod {
                 name: "setBlockNow".into(),
                 sig: "(Ljava/lang/String;IIILjava/lang/String;I)[I".into(),
                 fn_ptr: native_set_block_now as *mut c_void,
@@ -1829,6 +1834,24 @@ extern "system" fn native_set_block(
             position: [x, y, z],
             state: state.into(),
         });
+    }));
+}
+
+/// `Natives.blockEntityTicker(String dimension, int x, int y, int z, boolean up)`.
+extern "system" fn native_block_entity_ticker(
+    mut env: JNIEnv,
+    _class: JClass,
+    dimension: JString,
+    x: sys::jint,
+    y: sys::jint,
+    z: sys::jint,
+    up: sys::jboolean,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Ok(dimension) = env.get_string(&dimension) else {
+            return;
+        };
+        world::block_entity_ticker(&String::from(dimension), [x, y, z], up != 0);
     }));
 }
 

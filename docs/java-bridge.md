@@ -36,11 +36,32 @@ saying something works.
 
 ## How a tick flows
 
-1. Horizon's server tick → `java_server/tick.rs` (`tick_java_server`) → `events::game_time`, `events::server_tick` →
-   `HorizonServer.tick`: the headless client's tick first (`HorizonClient.clientTick`), players mirrored, Fabric events fired, mods' hooks, levels' ticks,
-   block entities (`HorizonBlockEntities.tick`), open menus (`stillValid`, `broadcastChanges`),
-   screens (`HorizonClient.sendFrames`: tasks, screen ticks, frames), `syncInventories`
-   (Horizon's block entities written back, menus shown, mods' messages delivered).
+1. The mirror's tick runs inside Horizon's, in vanilla's order (`java_server/phases.rs`,
+   bridge-sync; `events::phased(true)` each tick):
+   - **Start**, where the server's tick starts (the first level's `Game::tick`): `tick_java_server`
+     → `events::game_time`, `events::server_tick` → `HorizonServer.tick`: the headless client's
+     tick (`HorizonClient.clientTick`), `START_SERVER_TICK` and `tickServer`'s head, players
+     mirrored, Fabric events fired, functions, `HorizonItems.touchBlocks`.
+   - **Each level**, inside Horizon's `tick_world` of it (`events::level_phase` →
+     `HorizonServer.levelPhase`): its start (`START_LEVEL_TICK`, `ServerLevel.tick`'s head) first,
+     the mods' scheduled block and fluid ticks right after Horizon's (`tick_scheduled`), the mods'
+     block entities **in Horizon's block entity list** (`tick_block_entities`): each mod block
+     entity has a placeholder there (`BlockEntities::add_foreign`, from
+     `Natives.blockEntityTicker` as the mirror makes or drops one), in the order they were made,
+     and a run of them reached between Horizon's own ticks on the mirror then
+     (`events::level_block_entities` → `HorizonBlockEntities.tickOrdered`), before Horizon's next
+     (a hopper feeding a chute ticks first if it was placed first, as in vanilla's one list); its
+     end (`ServerLevel.tick`'s return, `END_LEVEL_TICK`) last. Horizon ticks only the levels it
+     keeps running; the mirror's other levels don't tick.
+   - **Each player's** tick hooks where Horizon ticks that player (`tick_guests` →
+     `events::player_tick` → `HorizonServer.playerTick`).
+   - **End**, after every level (`tick_server` → `java_tick_end` → `HorizonServer.tickEnd`):
+     levels left unended and players' hooks Horizon didn't reach, mods' entities and spawner,
+     items report, open menus (`stillValid`, `broadcastChanges`), screens
+     (`HorizonClient.sendFrames`), `END_SERVER_TICK`, tasks. Each part ends with
+     `syncInventories` (Horizon's block entities written back, menus shown, mods' messages
+     delivered), and Horizon applies its actions at once (`apply_java_actions`).
+   Unphased (`phased(false)`), `HorizonServer.tick` still runs everything in one call, as before.
 2. Java sends results back as actions (`Natives.*` → `events::Action`), applied in
    `java_server/tick.rs` (`apply_java_actions`). Blocks are not actions: a mod's
    `Level.setBlock(pos, state, flags)` is made in Horizon's world inside the Java call
@@ -1372,6 +1393,26 @@ Generic fixes found with Create Fly; regress `createpump`, `createfan` (scenes `
 
 ## 26.3 facts that cost time
 
+- **`HorizonServer.LEVELS` is keyed by `ResourceKey<Level>`**, not the dimension's name: an entry
+  point given `"minecraft:overworld"` looks its level up with `level(dimension)`.
+  `LEVELS.get(name)` is always null, quietly (bridge-sync's first phased build ticked no mod block
+  entity at all: every chute and shaft stood, 264 parity diffs).
+- **Per-tick work done "before the block entities" must stay once a tick** now that they tick in
+  several runs (bridge-sync): `playerMotionsBefore` took each player's motion from its move since
+  its last call; called per run, the second run saw no move and zeroed the motion a fan had just
+  given (Create's fan pushed a player 0.26 blocks instead of 0.92). It takes the moves once a tick
+  (`MOTIONS_TICK`). Horizon's items go to the mirror again right before each level's block
+  entities (`levelItems`: after Horizon's item tick moved them) and are reported right after
+  (`levelPhase` 2): sent only at the tick's start, crushing wheels and fans no longer processed
+  them.
+- **Mods' block entities tick from Horizon's list** (bridge-sync): `HorizonBlockEntities.up/down`
+  tell Horizon (`Natives.blockEntityTicker`) as one is made or goes; the game turns them into
+  placeholders (`BlockEntities::add_foreign`) at its level's next block entity tick, as vanilla's
+  pending tickers join. A placeholder isn't in the block entity map (nothing saves, sends or
+  spills it). One made while the level's block entities tick waits for the next tick (`BORN`).
+  Each run of them reached is one Java call that ends with `syncInventories`, so a chest a chute
+  filled is Horizon's again before the next hopper ticks.
+
 - **A mod's `setBlock` is made inside its call** (bridge-sync). `with_java_world` lends the game
   mutably (`&mut self`: a closure can't hold a borrow of it), and `JavaBlocks` reads Horizon's
   chunks through pointers each time, so a read after a write sees it. Java's per-thread section
@@ -2103,6 +2144,13 @@ Naturalist (mobs with ModelPart models, Fabric API only). The repo's own critter
 (`ENTITY=naturalist:bear` for another mod's).
 
 ## Status
+
+The mirror's tick inside Horizon's (2026-11-10, `bridge-sync` step 2): level-tick events
+(`START/END_LEVEL_TICK`, `ServerLevel.tick`'s hooks) around Horizon's real tick of each level, the
+mods' scheduled ticks after Horizon's, mods' block entities ticked from Horizon's own block entity
+list in vanilla's order (a placeholder each, in the order they were made, between Horizon's
+hoppers and chests), players' tick hooks where Horizon ticks each player, the server tick's end
+after every level. See "How a tick flows". Bench: 0 parity diffs, save and cross-open OK.
 
 Mods' writes made inside their call (2026-11-10, `bridge-sync` step 1): a mod's `Level.setBlock`
 goes straight into Horizon's world during the Java call (`Natives.setBlockNow`), with the mod's
