@@ -127,8 +127,10 @@ public final class HorizonGraphics extends GuiGraphicsExtractor {
             Object[] record = {now, null};
             PIP_LAST.put(key, record);
             owner.recording = record;
+            long started = HorizonProfile.start();
             try {
                 prepare(renderer, state, this);
+                HorizonProfile.add("HUD: picture in picture drawn", started);
             } catch (Throwable t) {
                 if (PIP_FAILURES.merge(state.getClass().getName(), 1, Integer::sum) <= 3) {
                     Natives.log("Horizon's client: a picture in picture (" + state.getClass().getName() + ") failed: " + t);

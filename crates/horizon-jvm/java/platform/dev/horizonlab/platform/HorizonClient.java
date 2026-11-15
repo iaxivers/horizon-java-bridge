@@ -3674,8 +3674,12 @@ public final class HorizonClient {
         // minimap: RenderSystem.getDevice()) fails every frame.
         Integer failed = HUD_FAILURES.get(part);
         if (failed != null && failed >= 3) return;
+        // Each part's time in the profile (HORIZON_JAVA_PROFILE): which mod's overlay the
+        // HUD's cost is. (UMP, 2026-11-13)
+        long started = HorizonProfile.start();
         try {
             run.run();
+            HorizonProfile.add("HUD " + part, started);
             if (failed != null) HUD_FAILURES.remove(part);
         } catch (Throwable t) {
             Throwable root = t;
