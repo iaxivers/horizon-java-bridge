@@ -262,9 +262,95 @@ fn find(source: &dyn Source, id: &str) -> Result<(browser::Project, browser::Ver
     Ok((project, version))
 }
 
+/// Modrinth's required dependencies of the jars it knows (looked up by SHA-1), as project ids:
+/// the mod id in fabric.mod.json need not be the project's name ("wover" is WorldWeaver).
+fn modrinth_required(jars: &[PathBuf], log: &dyn Fn(&str)) -> Vec<String> {
+    use sha1::Digest;
+    let hashes: Vec<String> = jars
+        .iter()
+        .filter_map(|j| std::fs::read(j).ok())
+        .map(|b| format!("{:x}", sha1::Sha1::digest(&b)))
+        .collect();
+    if hashes.is_empty() {
+        return Vec::new();
+    }
+    let body = serde_json::json!({"hashes": hashes, "algorithm": "sha1"});
+    let url = "https://api.modrinth.com/v2/version_files";
+    let resp = match browser::download::agent(url).post(url).send_json(body) {
+        Ok(r) => r,
+        Err(e) => { log(&format!("Java mods: Modrinth's dependency lookup failed: {e}")); return Vec::new() }
+    };
+    let v = match resp.into_json::<serde_json::Value>() {
+        Ok(v) => v,
+        Err(e) => { log(&format!("Java mods: Modrinth's dependency answer unreadable: {e}")); return Vec::new() }
+    };
+    let mut out = Vec::new();
+    for version in v.as_object().into_iter().flat_map(|o| o.values()) {
+        for d in version["dependencies"].as_array().into_iter().flatten() {
+            if d["dependency_type"] == "required" {
+                if let Some(p) = d["project_id"].as_str() {
+                    out.push(p.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Downloads into `dir` (`mods-java/`) every required mod its jars lack, and what those need in turn.
 pub fn resolve(source: &dyn Source, dir: &Path, log: &dyn Fn(&str)) -> Report {
     let mut report = Report::default();
+    // Modrinth's own links first: a required project none of the folder's jars came from.
+    {
+        let jars: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "jar")).collect();
+        let present: Vec<JarFacts> = jars.iter().map(|j| facts(j)).collect();
+        let required = modrinth_required(&jars, log);
+        for project in required {
+            // Fabric API: Horizon brings its own, pinned.
+            if project == "P7dR8mSH" { continue }
+            let p = match source.project(&project) {
+                Ok(p) => p,
+                Err(e) => { log(&format!("Java mods: Modrinth project {project}: {e}")); continue }
+            };
+            if p.kind != Kind::Mod { log(&format!("Java mods: {} is not a mod on Modrinth", p.title)); continue }
+            let versions = match source.versions(&p) {
+                Ok(v) => v,
+                Err(e) => { log(&format!("Java mods: {}'s versions: {e}", p.title)); continue }
+            };
+            let found = versions.into_iter().find(|v| {
+                v.loaders.iter().any(|l| l == "fabric")
+                    && v.game_versions.iter().any(|g| g == crate::java_mods::MINECRAFT)
+                    && v.file().is_some()
+            });
+            let Some(version) = found else {
+                log(&format!("Java mods: {} has no Fabric {} version", p.title, crate::java_mods::MINECRAFT));
+                continue;
+            };
+            let Some(file) = version.file().cloned() else { continue };
+            if dir.join(&file.name).exists() { continue }
+            // Already there under another file name (its mod id is in a jar): nothing to do.
+            let path = match browser::download::fetch(&file, dir, &|_| {}) {
+                Ok(p) => p,
+                Err(e) => { log(&format!("Java mods: {} couldn't be downloaded: {e}", p.title)); continue }
+            };
+            let got = facts(&path);
+            let ids = got.ids.clone();
+            // Already there: its own id is one a jar of the folder provides (the libraries it carries
+            // inside, WunderLib in World Weaver, don't count).
+            let own = got.id.clone().unwrap_or_default();
+            if !own.is_empty() && present.iter().any(|f| f.ids.contains(&own)) {
+                log(&format!("Java mods: {} is already there ({own})", p.title));
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            log(&format!("Java mods: downloaded {} ({}), which a mod needs", p.title, file.name));
+            let key = got.id.clone().or_else(|| ids.iter().next().cloned()).unwrap_or(p.slug.clone());
+            report.added.insert(key, file.name);
+        }
+    }
     for _ in 0..MAX_ROUNDS {
         let jars: Vec<PathBuf> = std::fs::read_dir(dir)
             .into_iter()

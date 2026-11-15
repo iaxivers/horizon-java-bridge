@@ -45,7 +45,7 @@ const MAX: u64 = 1 << 30;
 ///
 /// It is kept between downloads: a fresh agent starts a new connection pool, so one per file would
 /// be a handshake per file, and a modpack brings hundreds.
-pub(super) fn agent(url: &str) -> ureq::Agent {
+pub fn agent(url: &str) -> ureq::Agent {
     let spec = crate::proxy::spec_for(url);
     horizon_port_pack::net::keep("browser", spec.as_deref(), |proxy| {
         let builder = ureq::AgentBuilder::new()
