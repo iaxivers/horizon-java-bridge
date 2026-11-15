@@ -225,16 +225,29 @@ fn find(source: &dyn Source, id: &str) -> Result<(browser::Project, browser::Ver
         }
     }
     if project.is_none() {
-        let mut q = browser::Query::new(id, Kind::Mod);
-        q.limit = 10;
-        let norm = |s: &str| s.to_ascii_lowercase().replace(['-', '_', ' ', '\''], "");
-        project = source
-            .search(&q)?
-            .into_iter()
-            .find(|p| {
-                let (slug, title, id) = (norm(&p.slug), norm(&p.title), norm(id));
-                slug == id || title == id || slug == format!("{id}api") || title == format!("{id}api")
-            });
+        let norm = |s: &str| s.to_ascii_lowercase().replace(['-', '_', ' ', '\'', '.'], "");
+        let want = norm(id);
+        // A search for an id written as one word ("forgeconfigapiport") finds nothing on
+        // Modrinth, whose names have spaces ("Forge Config API Port"): its leading part does.
+        let mut queries = vec![id.replace(['_', '-'], " ")];
+        for cut in [want.len() * 2 / 3, 8, 5] {
+            if cut >= 4 && cut < want.len() && want.is_char_boundary(cut) {
+                queries.push(want[..cut].to_string());
+            }
+        }
+        queries.dedup();
+        'search: for text in queries {
+            let mut q = browser::Query::new(&text, Kind::Mod);
+            q.limit = 20;
+            for p in source.search(&q).unwrap_or_default() {
+                let (slug, title) = (norm(&p.slug), norm(&p.title));
+                let api = format!("{want}api");
+                if slug == want || title == want || slug == api || title == api {
+                    project = Some(p);
+                    break 'search;
+                }
+            }
+        }
     }
     let project = project.ok_or_else(|| "not found on Modrinth".to_string())?;
     let version = source
