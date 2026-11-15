@@ -106,6 +106,11 @@ public final class FabricBoot {
             }
             throw e;
         }
+        try {
+            Class.forName("dev.horizonlab.platform.HorizonShapeMemo", true, gameLoader).getMethod("report").invoke(null);
+        } catch (ReflectiveOperationException e) {
+            // No platform mod.
+        }
         if (env == EnvType.CLIENT) {
             // Every client entrypoint runs, then Fabric throws what failed: a mod whose client
             // code needs more of a client than the headless one has loses that, not the rest.
