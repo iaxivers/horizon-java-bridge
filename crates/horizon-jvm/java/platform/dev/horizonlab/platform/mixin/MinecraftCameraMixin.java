@@ -21,10 +21,35 @@ public abstract class MinecraftCameraMixin {
         if (HorizonClient.headless()) cir.setReturnValue(((Minecraft) (Object) this).player);
     }
 
-    /** No frames, so no partial ticks: whole ticks (DeltaTracker.ONE). */
+    /**
+     * No frames, so no partial ticks: whole ticks. A real Timer, the type vanilla's field has (mods
+     * cast to it: Paladin's Furniture calls Timer.updatePauseState, and DeltaTracker.ONE, another
+     * class, failed the cast and stopped Fabric's start). It is never advanced, so its deltas stay
+     * one tick and its partial tick a whole one, as ONE's. (UMP, 2026-11-13)
+     */
     @Inject(method = "getDeltaTracker", at = @At("HEAD"), cancellable = true)
     private void horizon$deltaTracker(CallbackInfoReturnable<DeltaTracker> cir) {
-        if (HorizonClient.headless()) cir.setReturnValue(DeltaTracker.ONE);
+        if (HorizonClient.headless()) cir.setReturnValue(WHOLE_TICKS);
+    }
+
+    private static final DeltaTracker.Timer WHOLE_TICKS = wholeTicks();
+
+    private static DeltaTracker.Timer wholeTicks() {
+        DeltaTracker.Timer timer = new DeltaTracker.Timer(20.0F, 0L, mspt -> mspt);
+        // Its fields as one whole tick: what ONE answers.
+        try {
+            for (String name : new String[] {"deltaTicks", "realtimeDeltaTicks"}) {
+                var field = DeltaTracker.Timer.class.getDeclaredField(name);
+                field.setAccessible(true);
+                field.setFloat(timer, 1.0F);
+            }
+            var residual = DeltaTracker.Timer.class.getDeclaredField("deltaTickResidual");
+            residual.setAccessible(true);
+            residual.setFloat(timer, 1.0F);
+        } catch (ReflectiveOperationException e) {
+            // Fields renamed: its deltas start at 0, the partial tick too.
+        }
+        return timer;
     }
 
     /**
