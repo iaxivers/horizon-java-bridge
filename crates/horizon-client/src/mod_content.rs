@@ -2946,13 +2946,35 @@ pub fn resource_root(base: &Path, mods: &[ContentMod], cache: &Path) -> Result<P
         // A reused root warns as the build did.
         let warnings = fs::read_to_string(out.join(WARNINGS)).unwrap_or_default();
         warnings.lines().for_each(|w| log::warn!("Horizon: {w}"));
+        bundle_files(&out);
         return Ok(out);
     }
     for warning in build(base, mods, &out)? {
         log::warn!("Horizon: {warning}");
     }
     fs::write(out.join(STAMP), stamp)?;
+    bundle_files(&out);
     Ok(out)
+}
+
+/// The content root's small files in one file (`horizon_core::prepared_files`), as the
+/// prepared folder has them: a big pack's root holds about 200,000 (its mods' models, recipes,
+/// loot tables, textures), and each start opened every one it read, at milliseconds a file
+/// on Windows (the first read of a file is scanned), most of a start. Written once for a root
+/// (again when it is rebuilt or the bundle no longer matches); a failure only costs speed.
+/// (UMP, 2026-11-14)
+fn bundle_files(out: &Path) {
+    if horizon_core::prepared_files::open(out).is_some() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    match horizon_core::prepared_files::write(out) {
+        Ok(()) => log::info!(
+            "Horizon: the mods' content files bundled into one in {:.1}s",
+            started.elapsed().as_secs_f32()
+        ),
+        Err(e) => log::warn!("Horizon: the mods' content files were not bundled: {e}"),
+    }
 }
 
 /// In a root built by [`build`]: its warnings, one per line.
