@@ -417,10 +417,13 @@ impl Column {
         chunk: &Chunk,
         kinds: &[u8],
         water: Option<BlockStateId>,
+        snow: &Snow,
         x: i32,
         z: i32,
     ) -> Self {
         let kind = |state: BlockStateId| kinds.get(state.0 as usize).copied().unwrap_or(0);
+        let kind_of = kind;
+        let snow_block = snow.block;
         let face_light = |y: i32| {
             let mut sky = 0;
             let mut block = 0;
@@ -456,6 +459,29 @@ impl Column {
                 let y = min + offset;
                 let mut state = BlockStateId(chunk.get(x, y, z));
                 let mut kind = kind(state);
+                if snow.layers.contains(&state.0) {
+                    // The snow layer stands for the snow block on the run below it: its top
+                    // face draws snow, the run's height unchanged.
+                    if let Some(snow) = snow_block
+                        && let Some(top) = column.spans.0.last_mut()
+                        && i32::from(top.max) == y
+                        && kind_of(top.state) & FLUID == 0
+                    {
+                        if top.max - top.min > 1 {
+                            top.max -= 1;
+                            let under = *top;
+                            column.push(Span {
+                                min: under.max,
+                                max: under.max + 1,
+                                state: snow,
+                                ..under
+                            });
+                        } else {
+                            top.state = snow;
+                        }
+                    }
+                    continue;
+                }
                 if kind & KEPT == 0 {
                     continue;
                 }
@@ -507,8 +533,10 @@ impl Column {
 /// A chunk's 256 columns (`Column::from_chunk`), on the far-terrain worker.
 pub(crate) fn summarize(chunk: &Chunk, kinds: &[u8]) -> Arc<[Column; 256]> {
     let water = water_source(kinds);
+    let none = Snow::default();
+    let snow = SNOW.get().unwrap_or(&none);
     Arc::new(std::array::from_fn(|i| {
-        Column::from_chunk(chunk, kinds, water, (i & 15) as i32, (i >> 4) as i32)
+        Column::from_chunk(chunk, kinds, water, snow, (i & 15) as i32, (i >> 4) as i32)
     }))
 }
 /// The water source state: the first plain kept fluid without light
@@ -528,9 +556,36 @@ const AIR: u8 = 4;
 /// waterlogged blocks that aren't kept): far terrain draws water there, or
 /// kelp reaching the surface leaves holes in the sea.
 const WATERY: u8 = 8;
+/// The snow layer and the snow block, by state (`snow_states`): far terrain draws a snow
+/// layer as the snow block's top on the ground under it. At a distance it is the ground's
+/// colour; left out, the grass under the snow showed and far snowy plains and mountains came
+/// out green. The kinds' high nibble is the light emission, so these are kept apart.
+/// (UMP, 2026-11-13)
+static SNOW: std::sync::OnceLock<Snow> = std::sync::OnceLock::new();
+/// The snow layer states and the snow block, for `Column::from_chunk`.
+#[derive(Default)]
+pub(crate) struct Snow {
+    layers: FxHashSet<u32>,
+    block: Option<BlockStateId>,
+}
 /// What `Column::from_chunk` needs of each block state, read from the facts
 /// once: matching their names for every block made observing a chunk slow.
 pub(crate) fn state_kinds(facts: &BlockFacts) -> Vec<u8> {
+    SNOW.get_or_init(|| {
+        let mut layers = FxHashSet::default();
+        let mut block = None;
+        for i in 0..facts.states.len() {
+            let state = BlockStateId(i as u32);
+            match &*facts.get(state).name {
+                "minecraft:snow" => {
+                    layers.insert(i as u32);
+                }
+                "minecraft:snow_block" if block.is_none() => block = Some(state),
+                _ => {}
+            }
+        }
+        Snow { layers, block }
+    });
     (0..facts.states.len())
         .map(|i| {
             let state = BlockStateId(i as u32);
@@ -3664,6 +3719,28 @@ mod tests {
         assert!(!nearly_full("minecraft:wheat"));
     }
     #[test]
+    fn a_snow_layer_is_drawn_as_snow_on_the_ground_under_it() {
+        // 0 air, 1 grass, 2 snow layer (not kept), 3 snow block.
+        let kinds = [AIR, KEPT, 0, KEPT];
+        let snow = Snow {
+            layers: FxHashSet::from_iter([2]),
+            block: Some(BlockStateId(3)),
+        };
+        let mut chunk = Chunk::empty(0, 0);
+        for y in MIN_Y..64 {
+            chunk.set(5, y, 5, 1);
+            chunk.set(6, y, 5, 1);
+        }
+        chunk.set(5, 64, 5, 2);
+        let snowy = Column::from_chunk(&chunk, &kinds, None, &snow, 5, 5);
+        let bare = Column::from_chunk(&chunk, &kinds, None, &snow, 6, 5);
+        let top = snowy.spans.last().unwrap();
+        assert_eq!((top.min, top.max, top.state), (63, 64, BlockStateId(3)));
+        assert_eq!(snowy.surface.unwrap().state, BlockStateId(3));
+        assert_eq!(snowy.surface.unwrap().height, 64, "the ground keeps its height");
+        assert_eq!(bare.surface.unwrap().state, BlockStateId(1));
+    }
+    #[test]
     fn kelp_to_the_surface_is_drawn_as_water() {
         // 0 air, 1 stone, 2 water, 3 kelp (holds water, draws as none).
         let kinds = [AIR, KEPT, KEPT | FLUID, KEPT | FLUID | WATERY];
@@ -3679,8 +3756,8 @@ mod tests {
         }
         let water = water_source(&kinds);
         assert_eq!(water, Some(BlockStateId(2)));
-        let kelp = Column::from_chunk(&chunk, &kinds, water, 3, 3);
-        let sea = Column::from_chunk(&chunk, &kinds, water, 4, 3);
+        let kelp = Column::from_chunk(&chunk, &kinds, water, &Snow::default(), 3, 3);
+        let sea = Column::from_chunk(&chunk, &kinds, water, &Snow::default(), 4, 3);
         assert_eq!(kelp.spans, sea.spans);
         assert_eq!(
             kelp.spans.last().map(|s| (s.min, s.max, s.state)),
