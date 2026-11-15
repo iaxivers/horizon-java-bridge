@@ -392,6 +392,13 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+/// How far an entity's pose is from the look before its current one to the current one: a look
+/// that stands `age` ticks after a gap of `span` ticks moves over the whole gap, `alpha` of the
+/// way into this tick, and then holds.
+fn pose_progress(age: u32, span: u32, alpha: f32) -> f32 {
+    ((age as f32 + alpha) / span.max(1) as f32).min(1.0)
+}
+
 impl JavaEntities {
     /// A tick's entities from the server.
     /// The places of block entities drawn whole (`whole`), for the chunk models to leave out.
@@ -698,8 +705,7 @@ impl Game<'_> {
             let packed = (u32::from(light >> 4) * 16) | ((u32::from(light & 15) * 16) << 8);
             let before = java.before.get(&s.id);
             let base = glam::Mat4::from_translation(d.as_vec3());
-            // Its pose this far from the look before to this one, over the ticks between them.
-            let pose_t = ((s.age as f32 + t) / s.span.max(1) as f32).min(1.0);
+            let pose_t = pose_progress(s.age, s.span, t);
             self.draw_look(
                 s.id, &s.models, &s.meshes, &s.items, before, base, packed, pose_t, out,
             );
@@ -1173,5 +1179,24 @@ impl Game<'_> {
             log::warn!("Java mods: a projectile's hit on a mod entity failed: {e}");
             false
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pose_redrawn_every_few_ticks_moves_over_the_whole_gap() {
+        // Redrawn every tick: the usual lerp over the tick.
+        assert_eq!(pose_progress(0, 1, 0.5), 0.5);
+        // Redrawn every 4th tick: a quarter of the way per tick, never a jump then a hold.
+        assert_eq!(pose_progress(0, 4, 0.0), 0.0);
+        assert_eq!(pose_progress(1, 4, 0.0), 0.25);
+        assert_eq!(pose_progress(3, 4, 1.0), 1.0);
+        // Kept longer than the gap (a resting mob): it holds its pose.
+        assert_eq!(pose_progress(9, 4, 0.5), 1.0);
+        // A broken span counts as one tick.
+        assert_eq!(pose_progress(0, 0, 0.5), 0.5);
     }
 }
