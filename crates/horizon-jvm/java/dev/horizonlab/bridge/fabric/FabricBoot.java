@@ -77,6 +77,12 @@ public final class FabricBoot {
         }
         FabricLoaderImpl loader = FabricLoaderImpl.INSTANCE;
         bootstrapGame();
+        // The updated structure templates read ahead while the mods start (HorizonTemplateCache).
+        try {
+            Class.forName("dev.horizonlab.platform.HorizonTemplateCache", true, gameLoader).getMethod("preload").invoke(null);
+        } catch (ReflectiveOperationException | LinkageError e) {
+            // No platform mod, or not yet loadable: read when asked.
+        }
         loader.prepareModInit(HorizonGameProvider.gameDir, null);
         if (env == EnvType.CLIENT) {
             // Horizon's headless client, which mods' code reaches (Minecraft.getInstance()): made
