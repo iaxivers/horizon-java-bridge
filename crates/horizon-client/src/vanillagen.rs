@@ -686,8 +686,9 @@ impl VanillaTerrain {
         u64::try_from(self.created.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 }
-/// A bundle directory, the data packs over it, and what loading them gave.
-type SharedEntry = (std::path::PathBuf, WorldgenOverrides, Arc<GeneratorData>);
+/// A bundle directory, the data packs over it, and what loading them gave (once loaded).
+type Slot = Arc<std::sync::OnceLock<std::result::Result<Arc<GeneratorData>, String>>>;
+type SharedEntry = (std::path::PathBuf, WorldgenOverrides, Slot);
 static SHARED_DATA: std::sync::Mutex<Vec<SharedEntry>> = std::sync::Mutex::new(Vec::new());
 /// Bundles with data packs kept besides the plain ones: a world's dimensions
 /// share one, and returning to a world finds it.
@@ -710,45 +711,67 @@ pub fn shared_data(
 }
 /// `shared_data` with a world's data packs over the bundle: loaded once for
 /// each set of packs' entries, the most recent few kept.
+///
+/// The list's lock is held only to find or add the entry, not through the load: a load of
+/// one set of packs (far terrain's, with the mods' noise: 7 s with 184 mods) held it whole,
+/// and the world's own generator, asking for another set, waited behind it in the join (UMP
+/// join samples: VanillaTerrain::for_world_with waiting in shared_data_with). A second ask
+/// for the same set waits for that one load. (UMP, 2026-11-14)
 pub fn shared_data_with(
     dir: &Path,
     overrides: &WorldgenOverrides,
     registry: &'static BlockRegistry,
 ) -> crate::Result<Arc<GeneratorData>> {
-    let mut cache = SHARED_DATA.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, _, data)) = cache
-        .iter()
-        .find(|(path, o, _)| path == dir && o == overrides)
-    {
-        return Ok(data.clone());
+    let slot = {
+        let mut cache = SHARED_DATA.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, _, slot)) = cache
+            .iter()
+            .find(|(path, o, _)| path == dir && o == overrides)
+        {
+            slot.clone()
+        } else {
+            // A load the cache held another set of packs for (the launch's preload): what
+            // differs, as the reason the world waits for this load.
+            if let Some((_, other, _)) = cache
+                .iter()
+                .find(|(path, o, _)| path == dir && !o.is_empty() && o != overrides)
+            {
+                log::info!(
+                    "Horizon: worldgen data loaded again: the packs differ from the preloaded in {}",
+                    overrides.differences(other).join(", ")
+                );
+            }
+            if !overrides.is_empty()
+                && cache.iter().filter(|e| !e.1.is_empty()).count() >= SHARED_WITH_PACKS
+            {
+                let oldest = cache.iter().position(|e| !e.1.is_empty());
+                cache.remove(oldest.expect("counted"));
+            }
+            let slot: Slot = Arc::default();
+            cache.push((dir.to_owned(), overrides.clone(), slot.clone()));
+            slot
+        }
+    };
+    let loaded = slot.get_or_init(|| {
+        let started = std::time::Instant::now();
+        let data = GeneratorData::load_with(dir, registry, overrides).map_err(|e| e.to_string())?;
+        log::info!("Horizon: worldgen data loaded in {:?}", started.elapsed());
+        for warning in data.warnings() {
+            log::warn!("Horizon: data pack worldgen: {warning}");
+        }
+        horizon_threads::trim_heap();
+        crate::mem_log::mark("worldgen data");
+        Ok(data)
+    });
+    match loaded {
+        Ok(data) => Ok(data.clone()),
+        Err(e) => {
+            // A failed load is not kept: the next ask tries again.
+            let mut cache = SHARED_DATA.lock().unwrap_or_else(|e| e.into_inner());
+            cache.retain(|(_, _, s)| !Arc::ptr_eq(s, &slot));
+            Err(e.clone().into())
+        }
     }
-    // A load the cache held another set of packs for (the launch's preload): what differs,
-    // as the reason the world waits for this load.
-    if let Some((_, other, _)) = cache
-        .iter()
-        .find(|(path, o, _)| path == dir && !o.is_empty() && o != overrides)
-    {
-        log::info!(
-            "Horizon: worldgen data loaded again: the packs differ from the preloaded in {}",
-            overrides.differences(other).join(", ")
-        );
-    }
-    let started = std::time::Instant::now();
-    let data = GeneratorData::load_with(dir, registry, overrides)?;
-    log::info!("Horizon: worldgen data loaded in {:?}", started.elapsed());
-    for warning in data.warnings() {
-        log::warn!("Horizon: data pack worldgen: {warning}");
-    }
-    if !overrides.is_empty()
-        && cache.iter().filter(|e| !e.1.is_empty()).count() >= SHARED_WITH_PACKS
-    {
-        let oldest = cache.iter().position(|e| !e.1.is_empty());
-        cache.remove(oldest.expect("counted"));
-    }
-    horizon_threads::trim_heap();
-    crate::mem_log::mark("worldgen data");
-    cache.push((dir.to_owned(), overrides.clone(), data.clone()));
-    Ok(data)
 }
 impl ChunkGenerator for VanillaTerrain {
     type Worker = GeneratorWorker;
