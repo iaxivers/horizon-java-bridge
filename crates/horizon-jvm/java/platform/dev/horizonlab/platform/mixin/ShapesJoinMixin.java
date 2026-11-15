@@ -39,6 +39,25 @@ public abstract class ShapesJoinMixin {
         HorizonShapeMemo.putJoin(first, second, op, info.getReturnValue());
     }
 
+    /**
+     * Shapes.create (box, and every block's Block.box/column) gives the same instance for the same
+     * six coordinates: mods build their shapes from new boxes on every call (Yuushya's collision
+     * files, Stoneworks, Macaw's), so the joins above saw new objects each time and remembered
+     * nothing. Equal boxes are equal shapes; a shared one changes nothing a mod can see.
+     */
+    @Inject(method = "create(DDDDDD)Lnet/minecraft/world/phys/shapes/VoxelShape;", at = @At("HEAD"), cancellable = true)
+    private static void horizon$sharedBox(double x0, double y0, double z0, double x1, double y1, double z1,
+                                          CallbackInfoReturnable<VoxelShape> info) {
+        VoxelShape known = HorizonShapeMemo.getBox(x0, y0, z0, x1, y1, z1);
+        if (known != null) info.setReturnValue(known);
+    }
+
+    @Inject(method = "create(DDDDDD)Lnet/minecraft/world/phys/shapes/VoxelShape;", at = @At("RETURN"))
+    private static void horizon$keepBox(double x0, double y0, double z0, double x1, double y1, double z1,
+                                        CallbackInfoReturnable<VoxelShape> info) {
+        HorizonShapeMemo.putBox(x0, y0, z0, x1, y1, z1, info.getReturnValue());
+    }
+
     @Inject(method = "joinIsNotEmpty(Lnet/minecraft/world/phys/shapes/VoxelShape;Lnet/minecraft/world/phys/shapes/VoxelShape;Lnet/minecraft/world/phys/shapes/BooleanOp;)Z",
             at = @At("RETURN"))
     private static void horizon$remember(VoxelShape first, VoxelShape second, BooleanOp op, CallbackInfoReturnable<Boolean> info) {
