@@ -1444,6 +1444,11 @@ unsafe fn bytes<'a>(address: jlong, len: jlong) -> &'a [u8] {
     unsafe { std::slice::from_raw_parts(address as *const u8, len as usize) }
 }
 
+/// Opens the device now if it isn't (the game's window asks first, so this device comes first).
+pub fn open_now() {
+    with((), |_| ());
+}
+
 /// Runs `f` on the device (opened on first use); `default` when there is none.
 fn with<T>(default: T, f: impl FnOnce(&mut Gpu) -> T) -> T {
     let mut guard = GPU.lock().unwrap_or_else(|e| e.into_inner());
