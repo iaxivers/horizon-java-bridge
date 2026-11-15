@@ -3427,6 +3427,11 @@ public final class HorizonClient {
                 // Its tick rate (ClientboundTickingStatePacket's): the server's (potions'
                 // tooltips read it for their durations; JEI's search reads every tooltip).
                 set(owner, level, "tickRateManager", server.tickRateManager());
+                // Its level extractor (the renderer the constructor gives it): the client's, which
+                // Horizon's draw stands in for (LevelExtractorMixin: nothing to redraw). Without it
+                // every block change a mod's block entity makes on the client (Yuushya's, Supplementaries')
+                // threw, every tick. (UMP, 2026-11-12)
+                set(owner, level, "levelExtractor", minecraft.levelExtractor);
                 // Its chunk source (mods ask it for the light engine: Xaero's World Map), its
                 // light Horizon's as the level's own (LevelMixin).
                 try {
