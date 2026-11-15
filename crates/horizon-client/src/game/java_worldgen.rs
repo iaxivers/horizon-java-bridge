@@ -235,6 +235,18 @@ impl JavaTerrain {
             if !modded {
                 self.custom.get_or_init(|| false);
                 self.inner.no_oracle();
+            } else {
+                // The far terrain's land from the mods' noise (exported from Java, then a second
+                // generator's data: 10-20 s with a big pack) is made now, beside the join, not when
+                // the first far tile asks for it: far terrain then fills in once the world is in
+                // instead of starting the wait there. (UMP, 2026-11-11)
+                let land = self.land.clone();
+                let _ = std::thread::Builder::new()
+                    .name("Far terrain noise".into())
+                    .spawn(move || {
+                        horizon_threads::far_terrain_current();
+                        let _ = land.terrain();
+                    });
             }
             modded
         })
