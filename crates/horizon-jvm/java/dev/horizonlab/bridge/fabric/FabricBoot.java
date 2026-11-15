@@ -48,6 +48,14 @@ public final class FabricBoot {
         HorizonGameProvider.version = version;
         HorizonGameProvider.gameJar = Paths.get(gameJar).toAbsolutePath();
         HorizonGameProvider.gameDir = Paths.get(gameDir).toAbsolutePath();
+        // A vanilla game folder always has mods/ (a launcher makes it): mods read their add-on
+        // packs from there (Yuushya's addons) and fail to start when it's missing. Horizon keeps
+        // Java mods in mods-java/, so an empty mods/ is made beside it. (UMP, 2026-11-12)
+        try {
+            java.nio.file.Files.createDirectories(HorizonGameProvider.gameDir.resolve("mods"));
+        } catch (java.io.IOException | RuntimeException e) {
+            // A read-only game folder: mods that need it say so themselves.
+        }
         List<Path> libs = new ArrayList<>();
         for (String library : libraries) libs.add(Paths.get(library).toAbsolutePath());
         HorizonGameProvider.libraries = libs;
