@@ -47,7 +47,8 @@
     "MirrorUpdatesMixin",
     "MirrorConnectionMixin",
     "CombatCaptureMixin",
-    "FallCaptureMixin"
+    "FallCaptureMixin",
+    "TolerantRegistryMixin"
   ],
   "injectors": {
     "defaultRequire": 1
