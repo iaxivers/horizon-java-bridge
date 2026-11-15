@@ -54,6 +54,10 @@ public final class HorizonClient {
      */
     public static void gameStart(boolean after) {
         HorizonHooks.scanNow();
+        // The mixins' field initializers on the client, which its constructor would run first
+        // (allocated without it): Spell Engine's key list was null in every key handling.
+        // (UMP, 2026-11-11)
+        if (!after) HorizonHooks.initFields(minecraft);
         HorizonHooks.fireClient(minecraft, after ? HorizonHooks.START_AFTER : HorizonHooks.START_BEFORE);
     }
 
