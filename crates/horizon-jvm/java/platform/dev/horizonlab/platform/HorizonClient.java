@@ -3548,6 +3548,7 @@ public final class HorizonClient {
     /** HORIZON_JAVA_DEBUG=hud: each HUD frame's size is logged. */
     private static final boolean DEBUG_HUD = String.valueOf(System.getenv("HORIZON_JAVA_DEBUG")).contains("hud");
     private static final java.util.Map<String, Integer> HUD_FAILURES = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int HUD_EVERY = Math.max(1, Integer.parseInt(String.valueOf(System.getenv("HORIZON_HUD_EVERY")).replaceAll("\\D", "").isEmpty() ? "2" : String.valueOf(System.getenv("HORIZON_HUD_EVERY")).replaceAll("\\D", "")));
     /** The last HUD sent to each player. */
     private static final java.util.Map<java.util.UUID, String> HUD_SENT = new java.util.concurrent.ConcurrentHashMap<>();
     /** Hud's parts under extractPlayerHealth (the hearts, food, armour, air: AppleSkin's). */
@@ -3581,6 +3582,11 @@ public final class HorizonClient {
 
     /** The player's HUD as their client's mods draw it, to them when it changed. */
     private static void sendHud(net.minecraft.server.level.ServerPlayer player) {
+        // Built every 2nd tick (10 a second, as often as the minimap's picture already is): the
+        // mods' HUD cost 9-10 ms of every tick with 300 mods, a core's fifth while standing still
+        // (user: CPU used a lot). The player's game keeps showing the last one between.
+        // HORIZON_HUD_EVERY=1 builds it every tick. (UMP, 2026-11-14)
+        if (HUD_EVERY > 1 && Math.floorMod(player.tickCount, HUD_EVERY) != 0 && HUD_SENT.containsKey(player.getUUID())) return;
         String frame = hud(player).toString();
         if (frame.equals(HUD_SENT.get(player.getUUID()))) return;
         HUD_SENT.put(player.getUUID(), frame);
