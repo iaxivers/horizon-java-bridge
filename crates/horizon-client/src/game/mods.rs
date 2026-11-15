@@ -83,6 +83,18 @@ pub(super) fn content_root(
     // The Java mods' content mods are always on, as dev mods are (the jars in mods-java/ are
     // what turns them on and off).
     let java = horizon_client::spans::startup::time("content.java_content", || super::java_mods::java_content(root));
+    // A content root built before (its stamp is there): Java and Fabric start now, beside the
+    // reading of the mods' content below (40 s with a big pack), not after it; their start
+    // (90 s with 184 mods: mixins and the mods' entrypoints) is what a world's join waits for.
+    // When the root must be built again after all, the build runs beside Java's start, which
+    // only costs memory. (UMP, 2026-11-14)
+    if horizon_cache()
+        .join("mod-content")
+        .join(horizon_client::mod_content::STAMP_FILE)
+        .is_file()
+    {
+        super::java_mods::start_early();
+    }
     let dev = &[dev, java.as_slice()].concat();
     let mut paths = horizon_mods::find(&here.join(mod_list::DIR));
     paths.retain(|p| !dev.contains(p));
