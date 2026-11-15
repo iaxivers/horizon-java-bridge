@@ -616,6 +616,12 @@ fn create_vm(
         "-XX:G1PeriodicGCInterval=30000".into(),
         // Mods' identifiers and the mirror's names repeat: ~1.3M strings in a big pack.
         "-XX:+UseStringDeduplication".into(),
+        // Mods' online checks (update checkers, Patreon lists: Xaero's maps) opened with
+        // URLConnection's default of no timeout waited ~10 s each for the system's connect timeout
+        // on the world's start when a host didn't answer (UMP load-time test, 100 mods). A short
+        // connect timeout lets them fail fast; mods that set their own keep theirs.
+        "-Dsun.net.client.defaultConnectTimeout=3000".into(),
+        "-Dsun.net.client.defaultReadTimeout=5000".into(),
     ];
     if let Some(archive) = archive {
         options.push("-XX:+AutoCreateSharedArchive".into());
