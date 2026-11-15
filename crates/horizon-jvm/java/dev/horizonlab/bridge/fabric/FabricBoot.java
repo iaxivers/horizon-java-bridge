@@ -124,6 +124,15 @@ public final class FabricBoot {
                     while (cause.getCause() != null && cause.getCause() != cause) cause = cause.getCause();
                     Natives.log("  and: " + other.getMessage() + ", caused by " + cause);
                 }
+                // Kept for the reason a later failure gives: a mod whose client start failed half way
+                // (registered part of its content) can make the data load fail with a message naming
+                // none of them (Paladin's Furniture beside The Graveyard: "Unbound tags"). (UMP, 2026-11-13)
+                java.util.List<String> ids = new java.util.ArrayList<>();
+                for (Throwable t : prepend(e, e.getSuppressed())) {
+                    var m = java.util.regex.Pattern.compile("provided by '([^']+)'").matcher(String.valueOf(t.getMessage()));
+                    if (m.find()) ids.add(m.group(1));
+                }
+                clientFailures = String.join(", ", ids);
             }
             try {
                 Class<?> client = Class.forName("dev.horizonlab.platform.HorizonClient", true, gameLoader);
@@ -202,6 +211,16 @@ public final class FabricBoot {
     }
 
     /** A game or mod class, loaded and initialized by Knot, so Mixins apply to it. */
+    /** The mods whose client entrypoint failed, for a later failure's message ("" when none). */
+    public static volatile String clientFailures = "";
+
+    private static Throwable[] prepend(Throwable first, Throwable[] rest) {
+        Throwable[] all = new Throwable[rest.length + 1];
+        all[0] = first;
+        System.arraycopy(rest, 0, all, 1, rest.length);
+        return all;
+    }
+
     public static Class<?> gameClass(String name) throws ClassNotFoundException {
         if (gameLoader == null) throw new IllegalStateException("Fabric Loader is not started");
         return Class.forName(name.replace('/', '.'), true, gameLoader);

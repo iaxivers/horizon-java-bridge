@@ -411,8 +411,18 @@ pub fn start(config: &Config) -> Result<&'static Bridge, String> {
             let mods =
                 start_fabric(&mut env, fabric, &add_mods).map_err(|e| describe(&mut env, e))?;
             if platform {
-                prepare_data(&mut env, &config.work.join("datapacks"))
-                    .map_err(|e| describe(&mut env, e))?;
+                prepare_data(&mut env, &config.work.join("datapacks")).map_err(|e| {
+                    let why = describe(&mut env, e);
+                    // A mod whose client start failed half way can leave the data load failing
+                    // with a message that names none of them: name them as the likely cause.
+                    match client_failures(&mut env) {
+                        Some(mods) => format!(
+                            "{why}. These mods failed while starting, which can cause this \
+                             (try without them, or check they work together): {mods}"
+                        ),
+                        None => why,
+                    }
+                })?;
             }
             mods
         }
@@ -998,6 +1008,23 @@ fn start_fabric(
         env.delete_local_ref(item)?;
     }
     Ok(out)
+}
+
+/// The mods whose client start failed (`FabricBoot.clientFailures`), if any.
+fn client_failures(env: &mut JNIEnv) -> Option<String> {
+    let value = env
+        .get_static_field(
+            "dev/horizonlab/bridge/fabric/FabricBoot",
+            "clientFailures",
+            "Ljava/lang/String;",
+        )
+        .and_then(|v| v.l())
+        .ok()?;
+    if value.is_null() {
+        return None;
+    }
+    let text: String = env.get_string(&JString::from(value)).ok()?.into();
+    (!text.is_empty()).then_some(text)
 }
 
 /// Loads the server's data (vanilla's data pack and the mods'): `HorizonData.prepare`, in the
