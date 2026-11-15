@@ -72,7 +72,12 @@ impl Builder {
         // ticks and the frame leave, so more cores can share it: a third of
         // the threads, rounded up (a 4-thread machine's one thread left idle
         // time while the far trees and structures came in).
-        let count = horizon_threads::worker_count().div_ceil(3).clamp(1, 12);
+        // HORIZON_FAR_DECORATION_THREADS overrides it (A/B speed tests).
+        let count = std::env::var("HORIZON_FAR_DECORATION_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| horizon_threads::worker_count().div_ceil(3))
+            .clamp(1, 12);
         let threads = (0..count)
             .map(|_| Self::spawn(terrain.clone(), shared.clone(), tx.clone()))
             .collect();
