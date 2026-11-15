@@ -232,7 +232,10 @@ impl WorldRequest {
             level.position = None;
         }
         // A world saved in a mod's dimension waits for the mods to say what it is.
-        let dim = super::java_mods::level_named(&level.dimension);
+        let dim = {
+            let _wait = startup::step("world.level_named");
+            super::java_mods::level_named(&level.dimension)
+        };
         let shapes = level_shapes(&save_root, res.biomes());
         let shape = shapes.get(dim.id());
         let streaming_step = startup::step("world.make_streaming");

@@ -395,6 +395,13 @@ pub(in crate::game) fn level_named(id: &str) -> super::super::Dim {
     if let Some(dim) = super::super::Dim::known(id) {
         return dim;
     }
+    // No dimension saved (a new world, or level.dat without a player): the overworld, which
+    // needs nothing from the mods. Waiting for their start here held the world's opening
+    // behind the whole Java start (UMP startup trace: world.level_named 13.8 s with 184 mods).
+    // (UMP, 2026-11-15)
+    if id.is_empty() {
+        return super::super::Dim::Overworld;
+    }
     if has_java_mods() {
         wait_for_java(std::time::Duration::from_secs(300));
     }
