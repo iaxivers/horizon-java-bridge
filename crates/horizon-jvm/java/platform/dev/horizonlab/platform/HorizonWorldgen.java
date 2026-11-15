@@ -1103,6 +1103,10 @@ public final class HorizonWorldgen {
      * advancing neighbours never wait on each other in a circle.
      */
     private static void advance(Dimension d, ProtoChunk chunk, ChunkStatus target) {
+        // Mods' server configs before any feature is placed (Lost Cities reads its profile there):
+        // Horizon generates the spawn's chunks before its server's first tick and SERVER_STARTING,
+        // so the configs' defaults are loaded now, as a server start would. (UMP, 2026-11-11)
+        if (target.isOrAfter(ChunkStatus.FEATURES)) HorizonServer.defaultServerConfigs();
         for (ChunkStatus status : STEPS) {
             if (status.isAfter(target)) break;
             if (chunk.getPersistedStatus().isOrAfter(status)) continue;

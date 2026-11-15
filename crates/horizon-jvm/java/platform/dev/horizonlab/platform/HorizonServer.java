@@ -886,6 +886,45 @@ public final class HorizonServer {
         return HorizonFunctions.ready();
     }
 
+    private static boolean starting;
+
+    /**
+     * Fabric's SERVER_STARTING, once: from the first tick, or earlier when the mods' worldgen
+     * starts first (Horizon generates the spawn before its server ticks). Mods load their server
+     * configs there (Forge Config API Port: Lost Cities' profiles) and their features read them
+     * while generating. (UMP, 2026-11-11)
+     */
+    static synchronized void serverStarting(MinecraftServer server) {
+        if (starting || server == null) return;
+        starting = true;
+        fireEach("ServerLifecycleEvents.SERVER_STARTING", ServerLifecycleEvents.SERVER_STARTING, l -> l.onServerStarting(server));
+    }
+
+    private static volatile boolean serverConfigs;
+
+    /**
+     * NeoForge-style server configs (Forge Config API Port's ConfigTracker) with their defaults,
+     * once, if nothing loaded them yet: what a server's start does before generation. Reflective:
+     * nothing when no mod brings the tracker. The real files load at SERVER_STARTING as usual.
+     */
+    static void defaultServerConfigs() {
+        if (serverConfigs) return;
+        synchronized (HorizonServer.class) {
+            if (serverConfigs) return;
+            serverConfigs = true;
+            try {
+                Class<?> tracker = Class.forName("net.neoforged.fml.config.ConfigTracker", true, HorizonServer.class.getClassLoader());
+                Object instance = tracker.getField("INSTANCE").get(null);
+                tracker.getMethod("loadDefaultServerConfigs").invoke(instance);
+                Natives.log("Java mods: server configs' defaults loaded before generation (mods read them while generating)");
+            } catch (ClassNotFoundException e) {
+                // No mod uses them.
+            } catch (Throwable t) {
+                Natives.log("Java mods: server configs' defaults not loaded: " + t);
+            }
+        }
+    }
+
     public static boolean worldgenStart(String dimension, long seed, boolean structures, String world,
             String[] horizonCannot) {
         Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
@@ -1574,7 +1613,7 @@ public final class HorizonServer {
             // The constructor's hooks (biome modifications) come before the server starts, as
             // in vanilla, even when no dimension's generation has asked for them yet.
             HorizonWorldgen.readyBeforeTicks(seed);
-            fireEach("ServerLifecycleEvents.SERVER_STARTING", ServerLifecycleEvents.SERVER_STARTING, l -> l.onServerStarting(server));
+            serverStarting(server);
             // MinecraftServer.loadLevel (runServer's initServer): the levels exist at its end.
             hook(server, MinecraftServer.class, "loadLevel", "()V", "HEAD", NO_ARGUMENTS);
             for (String dimension : levelIds()) {
