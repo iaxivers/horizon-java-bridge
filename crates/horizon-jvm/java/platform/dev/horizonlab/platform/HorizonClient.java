@@ -2621,6 +2621,7 @@ public final class HorizonClient {
      */
     @SuppressWarnings("unchecked")
     private static void reloadClientResources() {
+        long reloadStarted = System.nanoTime();
         var type = net.minecraft.server.packs.PackType.CLIENT_RESOURCES;
         java.util.List<net.minecraft.server.packs.PackResources> packs = new java.util.ArrayList<>();
         try {
@@ -2702,8 +2703,11 @@ public final class HorizonClient {
                 continue;
             }
             try {
+                long began = System.nanoTime();
                 net.minecraft.server.packs.resources.SimpleReloadInstance.of(manager, java.util.List.of(listener), here, here,
                         java.util.concurrent.CompletableFuture.completedFuture(net.minecraft.util.Unit.INSTANCE)).done().join();
+                long took = (System.nanoTime() - began) / 1_000_000;
+                if (took >= 200) Natives.log("Horizon's client: a mod's resource reload took " + took + " ms: " + listener.getClass().getName());
                 ran++;
             } catch (Throwable t) {
                 Throwable root = t;
@@ -2722,7 +2726,8 @@ public final class HorizonClient {
                 }
             }
         }
-        Natives.log("Horizon's client: " + ran + " of the mods' resource reload listeners ran over " + packs.size()
+        Natives.log("Horizon's client: " + ran + " of the mods' resource reload listeners ran in "
+                + (System.nanoTime() - reloadStarted) / 1_000_000 + " ms over " + packs.size()
                 + " packs" + (skipped > 0 ? "; " + skipped + " that read baked models or textures run with the models" : ""));
     }
 

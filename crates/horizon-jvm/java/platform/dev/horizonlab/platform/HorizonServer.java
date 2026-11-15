@@ -1533,7 +1533,11 @@ public final class HorizonServer {
             if (client && !HorizonDeviceMods.runs(handler.getClass())) continue;
             String name = handler.getClass().getName();
             int lambda = name.indexOf("$$");
+            long began = System.nanoTime();
             fire(event + " [" + (lambda > 0 ? name.substring(0, lambda) : name) + "]", () -> call.accept((T) handler));
+            // A slow one, named: the world's start runs these one after another on the server thread.
+            long took = (System.nanoTime() - began) / 1_000_000;
+            if (took >= 300) Natives.log("Java mods: " + event + " took " + took + " ms in " + (lambda > 0 ? name.substring(0, lambda) : name));
         }
     }
 
