@@ -881,11 +881,17 @@ impl Game<'_> {
                 let x: i32 = arg(1)?.parse()?;
                 let z: i32 = arg(2)?.parse()?;
                 let found = self.lod.as_ref().and_then(|lod| lod.ground(x, z));
+                let biome = self
+                    .lod
+                    .as_ref()
+                    .and_then(|lod| lod.ground_biome(x, z))
+                    .map(|id| self.res.biomes().get(id).name.to_string());
                 Ok(Some(match found {
                     Some((height, state)) => json!({
                         "ok": true,
                         "height": height,
                         "block": self.res.facts().get(state).name.to_string(),
+                        "biome": biome,
                     }),
                     None => json!({"ok": true, "height": null}),
                 }))

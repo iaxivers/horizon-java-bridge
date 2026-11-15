@@ -2858,7 +2858,12 @@ fn stamp(base: &Path, mods: &[ContentMod]) -> Result<String> {
         ))
     };
     let mut parts = vec!["horizon mod content 1".to_owned()];
-    parts.push(meta(&std::env::current_exe()?)?);
+    // A developer's test folder kept across rebuilds (UMP's perf folders) may keep its built
+    // content when the game's code that builds it hasn't changed: rebuilding 100 mods' content
+    // after every build of the game took 10-30 minutes. Players never rebuild the game.
+    if std::env::var_os("HORIZON_CONTENT_KEEP_ACROSS_BUILDS").is_none() {
+        parts.push(meta(&std::env::current_exe()?)?);
+    }
     let base = std::path::absolute(base)?;
     parts.push(
         String::from_utf8_lossy(&fs::read(base.join("horizon-resources.json"))?).into_owned(),

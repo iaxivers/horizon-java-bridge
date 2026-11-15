@@ -1681,6 +1681,21 @@ impl Lod {
     /// its block, from the finest tile sampled there. For aiming past the
     /// resident chunks (`game.raycast`); water is passed, as the view's ray
     /// passes it.
+    /// The far column's biome at block column (x, z), from the finest tile sampled there.
+    pub fn ground_biome(&self, x: i32, z: i32) -> Option<u16> {
+        (0..=MAX_LEVEL).find_map(|level| {
+            let size = 16 << level;
+            let key = TileKey {
+                x: x.div_euclid(size),
+                z: z.div_euclid(size),
+                level,
+            };
+            let columns = self.ready.get(&key).filter(|c| c.len() == CELLS * CELLS)?;
+            let cell = size / CELLS as i32;
+            let (cx, cz) = ((x - key.x * size) / cell, (z - key.z * size) / cell);
+            Some(columns[cz as usize * CELLS + cx as usize].surface?.biome)
+        })
+    }
     pub fn ground(&self, x: i32, z: i32) -> Option<(i32, BlockStateId)> {
         (0..=MAX_LEVEL).find_map(|level| {
             let size = 16 << level;
