@@ -1017,18 +1017,18 @@ impl Game<'_> {
         }
         None
     }
+    /// `@e[type=#tag]`: from the entity type tags loaded with the game's data (every pack's, the
+    /// mods' included, nested tags resolved). It read and parsed the tag's JSON file for every
+    /// entity a selector tested: a data pack's tick function with such a selector made each tick
+    /// 100-200 ms of file reads with 300 mods (UMP flight profile: entity_tag_matches ->
+    /// std::fs::read in compute_condition), and only saw vanilla's own tags. (UMP, 2026-11-15)
     fn entity_tag_matches(&self, tag: &str, ty: &str) -> bool {
-        let path = self.options.resources.join(format!(
-            "data/minecraft/tags/entity_type/{}.json",
-            tag.trim_start_matches("minecraft:")
-        ));
-        serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap_or_default())
-            .ok()
-            .is_some_and(|v| {
-                v["values"]
-                    .as_array()
-                    .is_some_and(|a| a.iter().any(|e| e.as_str() == Some(ty)))
-            })
+        let tag = if tag.contains(':') {
+            std::borrow::Cow::Borrowed(tag)
+        } else {
+            std::borrow::Cow::Owned(format!("minecraft:{tag}"))
+        };
+        self.res.mob_data().entity_has(&tag, ty)
     }
     /// EntityArgument.getEntities / getPlayers / getEntity / getPlayer.
     pub(super) fn entities(&mut self, ctx: &Context, name: &str, players: bool) -> R<Vec<Target>> {
@@ -4191,6 +4191,12 @@ mod teleport_pitch_tests {
             )));
             assert_eq!(game.mobs[0].head_pitch, expected);
         }
+        // `type=#tag` from the loaded entity type tags: a zombie is undead, not a raider.
+        assert!(game.entity_tag_matches("minecraft:undead", "minecraft:zombie"));
+        assert!(game.entity_tag_matches("undead", "minecraft:zombie"));
+        assert!(!game.entity_tag_matches("minecraft:raiders", "minecraft:zombie"));
+        assert!(game.run_command("tp @e[type=#minecraft:undead,limit=1] 0 0 0 0 0"));
+        assert!(!game.run_command("tp @e[type=#minecraft:raiders,limit=1] 0 0 0 0 0"));
         game.yaw = 190.0;
         game.mobs[0].yaw = 170.0;
         assert!(game.run_command("tp @e[type=minecraft:zombie,limit=1] 0 0 0 ~ ~"));

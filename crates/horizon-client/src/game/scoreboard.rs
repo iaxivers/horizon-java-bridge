@@ -294,6 +294,14 @@ impl Game<'_> {
     ) -> HashSet<Target> {
         let mut pass = HashSet::new();
         let needs_holder = !s.scores.is_empty() || !s.teams.is_empty();
+        // The `nbt=` patterns parsed once for every candidate, not once each.
+        let patterns: Vec<(Option<horizon_world::nbt::Tag>, bool)> = s
+            .nbt
+            .iter()
+            .map(|(pattern, negated)| {
+                (horizon_world::nbt::parse_snbt(pattern).ok().map(|(p, _)| p), *negated)
+            })
+            .collect();
         for &t in candidates {
             let mut ok = true;
             if needs_holder {
@@ -337,12 +345,13 @@ impl Game<'_> {
             if ok && !s.nbt.is_empty() {
                 // NbtPredicate: the entity's saved data contains the pattern.
                 let data = self.entity_nbt(t);
-                for (pattern, negated) in &s.nbt {
-                    let matches = match (&data, horizon_world::nbt::parse_snbt(pattern)) {
-                        (Some(d), Ok((p, _))) => horizon_client::nbt_path::compare_nbt(&p, Some(d)),
+                for (pattern, negated) in &patterns {
+                    let negated = *negated;
+                    let matches = match (&data, pattern) {
+                        (Some(d), Some(p)) => horizon_client::nbt_path::compare_nbt(p, Some(d)),
                         _ => false,
                     };
-                    if matches == *negated {
+                    if matches == negated {
                         ok = false;
                     }
                 }

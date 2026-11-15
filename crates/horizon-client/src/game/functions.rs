@@ -385,8 +385,28 @@ impl Game<'_> {
                 None => self.run_function_by_id(&event.id, None, source),
             }
         }
+        // Each tick function timed on its own: the slow-tick line names the data pack's function
+        // that costs the tick (a mod's per-tick selectors). (UMP, 2026-11-15)
+        let started = std::time::Instant::now();
         for f in self.fns.store.tag_functions("minecraft:tick") {
+            let one = std::time::Instant::now();
             self.run_function_by_id(&f, None, source);
+            let ms = one.elapsed().as_secs_f32() * 1000.0;
+            if ms >= 5.0 {
+                SLOW_TICK_FUNCTIONS.with(|m| *m.borrow_mut().entry(f.clone()).or_insert(0.0) += ms);
+            }
+        }
+        // Every ~10 s, the tick functions that cost 5 ms or more, by total time.
+        if started.elapsed().as_millis() > 0 && self.world.game_time % 200 == 0 {
+            SLOW_TICK_FUNCTIONS.with(|m| {
+                let mut m = m.borrow_mut();
+                if !m.is_empty() {
+                    let mut all: Vec<_> = m.drain().collect();
+                    all.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    let list: Vec<String> = all.iter().take(6).map(|(f, ms)| format!("{f} {ms:.0} ms")).collect();
+                    log::info!("Horizon: slow tick functions over 10 s: {}", list.join(", "));
+                }
+            });
         }
     }
     fn run_function_by_id(&mut self, id: &str, args: Option<&Tag>, source: Source) {
@@ -1128,4 +1148,9 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+thread_local! {
+    /// Tick functions that took 5 ms or more since the last report (tick_functions), in ms.
+    static SLOW_TICK_FUNCTIONS: std::cell::RefCell<std::collections::HashMap<String, f32>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
