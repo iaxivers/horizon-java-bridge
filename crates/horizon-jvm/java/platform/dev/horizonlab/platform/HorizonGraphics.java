@@ -450,12 +450,14 @@ public final class HorizonGraphics extends GuiGraphicsExtractor {
             // its elements after the whole screen is extracted.
             var image = new JsonObject();
             ops.add(image);
-            pendingReads.add(new Object[]{image, view, name});
+            pendingRead = new Object[]{image, view, name, null};
+            pendingReads.add(pendingRead);
         }
         pose().pushMatrix();
         pose().identity();
         try {
             JsonObject o = op("blit");
+            if (pendingRead != null && pendingRead[3] == null && pendingRead[1] == view) pendingRead[3] = o;
             o.addProperty("texture", name);
             o.addProperty("x0", x0);
             o.addProperty("y0", y0);
@@ -473,6 +475,8 @@ public final class HorizonGraphics extends GuiGraphicsExtractor {
 
     /** Image ops waiting for their GPU texture's pixels: {placeholder, view, name}. */
     private final java.util.List<Object[]> pendingReads = new java.util.ArrayList<>();
+    /** The pending read the next blit belongs to ({placeholder, view, name, blit op}). */
+    private Object[] pendingRead;
 
     /** Fills the image ops of the GPU textures blitted this frame, or drops them (no change). */
     private void readPending() {
@@ -491,6 +495,17 @@ public final class HorizonGraphics extends GuiGraphicsExtractor {
             Long last = big ? BIG_LAST.get(key) : null;
             byte[] rgba = last != null && now - last < PIP_INTERVAL || view.isClosed() ? null : HorizonGpu.pixels(view);
             if (rgba != null && big) BIG_LAST.put(key, now);
+            // A big target drawn only in part (JourneyMap's minimap renders into a window-sized
+            // texture and blits all of it, transparent but for its corner): only the rectangle that
+            // has pixels is sent, its blit moved onto it. Sending the whole window's pixels every few
+            // ticks was 12 MB of the HUD each time and stalled the window's frames. (UMP, 2026-11-11)
+            int[] crop = rgba != null && big && p[3] instanceof JsonObject ? drawnRect(rgba, w, h) : null;
+            if (crop != null && (long) crop[2] * crop[3] * 4 < (long) w * h * 3) {
+                rgba = cropped(rgba, w, crop);
+                moveBlit((JsonObject) p[3], w, h, crop);
+                w = crop[2];
+                h = crop[3];
+            }
             if (rgba != null && Math.max(w, h) > maxImage) {
                 double k = (double) Math.max(w, h) / maxImage;
                 int nw = Math.max(1, (int) Math.round(w / k)), nh = Math.max(1, (int) Math.round(h / k));
@@ -499,7 +514,7 @@ public final class HorizonGraphics extends GuiGraphicsExtractor {
                 h = nh;
             }
             if (DEBUG_GPU) debugImage(name, w, h, rgba);
-            int version = rgba == null ? 0 : java.util.Arrays.hashCode(rgba);
+            int version = rgba == null ? 0 : 31 * java.util.Arrays.hashCode(rgba) + (w * 65_537 + h);
             if (rgba == null || Integer.valueOf(version).equals(imagesSent.get(name))) {
                 drop.add(image);
                 continue;
@@ -527,6 +542,66 @@ public final class HorizonGraphics extends GuiGraphicsExtractor {
     /** The largest image the receiver of these ops takes, in pixels on a side (bigger ones are shrunk). */
     int maxImage = REMOTE_MAX_IMAGE;
     private static final java.util.Map<Object, Long> BIG_LAST = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** The rectangle {x, y, w, h} of {@code rgba}'s pixels that aren't fully transparent; null when none are. */
+    static int[] drawnRect(byte[] rgba, int w, int h) {
+        int minX = w, minY = h, maxX = -1, maxY = -1;
+        for (int y = 0; y < h; y++) {
+            int row = y * w * 4 + 3;
+            for (int x = 0; x < w; x++) {
+                if (rgba[row + x * 4] != 0) {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    maxY = y;
+                }
+            }
+        }
+        return maxX < 0 ? null : new int[] {minX, minY, maxX - minX + 1, maxY - minY + 1};
+    }
+
+    /** The rectangle {x, y, w, h} of rows {@code w} wide. */
+    static byte[] cropped(byte[] rgba, int w, int[] r) {
+        byte[] out = new byte[r[2] * r[3] * 4];
+        for (int y = 0; y < r[3]; y++) {
+            System.arraycopy(rgba, ((r[1] + y) * w + r[0]) * 4, out, y * r[2] * 4, r[2] * 4);
+        }
+        return out;
+    }
+
+    /**
+     * A blit of a whole w x h texture moved onto its rectangle r (texels): its screen corners where
+     * r's edges fall, its UVs within r's image. UVs run either way (render targets are upside down).
+     */
+    static void moveBlit(JsonObject o, int w, int h, int[] r) {
+        float x0 = o.get("x0").getAsFloat(), x1 = o.get("x1").getAsFloat();
+        float y0 = o.get("y0").getAsFloat(), y1 = o.get("y1").getAsFloat();
+        float u0 = o.get("u0").getAsFloat(), u1 = o.get("u1").getAsFloat();
+        float v0 = o.get("v0").getAsFloat(), v1 = o.get("v1").getAsFloat();
+        float[] across = clip(x0, x1, u0, u1, r[0] / (float) w, (r[0] + r[2]) / (float) w);
+        float[] down = clip(y0, y1, v0, v1, r[1] / (float) h, (r[1] + r[3]) / (float) h);
+        o.addProperty("x0", across[0]);
+        o.addProperty("x1", across[1]);
+        o.addProperty("u0", across[2]);
+        o.addProperty("u1", across[3]);
+        o.addProperty("y0", down[0]);
+        o.addProperty("y1", down[1]);
+        o.addProperty("v0", down[2]);
+        o.addProperty("v1", down[3]);
+    }
+
+    /** One axis of moveBlit: screen p0..p1 showing texture t0..t1, kept to texture lo..hi (renumbered 0..1). */
+    private static float[] clip(float p0, float p1, float t0, float t1, float lo, float hi) {
+        if (t0 == t1) return new float[] {p0, p1, 0f, 1f};
+        float a = Math.max(Math.min(t0, t1), lo), b = Math.min(Math.max(t0, t1), hi);
+        if (b <= a) return new float[] {p0, p0, 0f, 0f};
+        // where texture coordinate t falls on screen
+        float atA = p0 + (a - t0) / (t1 - t0) * (p1 - p0), atB = p0 + (b - t0) / (t1 - t0) * (p1 - p0);
+        float ua = (a - lo) / (hi - lo), ub = (b - lo) / (hi - lo);
+        // keep the blit's direction: the screen edge that showed t0 first
+        boolean forward = t1 > t0;
+        return forward ? new float[] {atA, atB, ua, ub} : new float[] {atB, atA, ub, ua};
+    }
 
     /**
      * RGBA rows {@code w} x {@code h} shrunk to {@code nw} x {@code nh} (not bigger) by a box
