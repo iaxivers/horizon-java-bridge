@@ -19,6 +19,9 @@ public final class HorizonShapeMemo {
     private static final boolean ON = !"0".equals(System.getenv("HORIZON_SHAPE_MEMO"));
     private static final int MAX = 2_000_000;
     private static final ConcurrentHashMap<Key, Boolean> MEMO = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Key, VoxelShape> JOINS = new ConcurrentHashMap<>();
+    private static final LongAdder JOIN_HITS = new LongAdder();
+    private static final LongAdder JOIN_MISSES = new LongAdder();
     private static final LongAdder HITS = new LongAdder();
     private static final LongAdder MISSES = new LongAdder();
 
@@ -48,12 +51,27 @@ public final class HorizonShapeMemo {
         MEMO.put(new Key(first, second, op), value);
     }
 
+    public static VoxelShape getJoin(VoxelShape first, VoxelShape second, BooleanOp op) {
+        if (!ON) return null;
+        VoxelShape known = JOINS.get(new Key(first, second, op));
+        if (known != null) JOIN_HITS.increment();
+        else JOIN_MISSES.increment();
+        return known;
+    }
+
+    public static void putJoin(VoxelShape first, VoxelShape second, BooleanOp op, VoxelShape value) {
+        if (!ON || value == null) return;
+        if (JOINS.size() >= MAX / 4) JOINS.clear();
+        JOINS.put(new Key(first, second, op), value);
+    }
+
     /** One line: how often the memory answered (called after the mods' entrypoints). */
     public static void report() {
         long hits = HITS.sum(), misses = MISSES.sum();
         if (hits + misses > 0) {
             Natives.log("Java mods: shape joins remembered " + hits + " of " + (hits + misses)
-                    + " times; " + MEMO.size() + " kept");
+                    + " times; " + MEMO.size() + " kept; joined shapes " + JOIN_HITS.sum() + " of "
+                    + (JOIN_HITS.sum() + JOIN_MISSES.sum()) + "; " + JOINS.size() + " kept");
         }
     }
 }
