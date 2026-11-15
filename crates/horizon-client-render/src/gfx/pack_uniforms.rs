@@ -309,6 +309,7 @@ pub const NAMES: &[&str] = &[
     "cloudTime",
     "isElytraFlying",
     "cloudHeight",
+    "lightningBoltPosition",
 ];
 
 /// What programs that draw the game's geometry (gbuffers, shadow) read as `fogMode`,
@@ -691,6 +692,15 @@ impl FrameUniforms {
                 "upPosition" => v3(to_view(Vec3::new(0.0, 100.0, 0.0))),
                 "sunPosition" => v3(sun),
                 "endFlashPosition" => v3(to_view(inputs.end_flash_direction)),
+                // Iris: the newest lightning bolt's position from the camera, w 1 while one is
+                // there, all 0 without (5 of the 8 most-downloaded packs flash their sky by it).
+                "lightningBoltPosition" => Value::f(&match frame.lightning.bolts.last() {
+                    Some(b) => {
+                        let at = (glam::DVec3::from(b.at) - frame.camera).as_vec3();
+                        [at.x, at.y, at.z, 1.0]
+                    }
+                    None => [0.0; 4],
+                }),
                 "centerDepthSmooth" => Value::f(&[center_depth]),
                 "moonPosition" => v3(moon),
                 "shadowLightPosition" => v3(if day { sun } else { moon }),
@@ -887,6 +897,7 @@ fn components(name: &str) -> usize {
         | "fogColor"
         | "skyColor"
         | "endFlashPosition" => 3,
+        "lightningBoltPosition" => 4,
         "eyeBrightness" | "eyeBrightnessSmooth" | "atlasSize" => 2,
         "entityColor" => 4,
         n if n.starts_with("gbuffer") || n.starts_with("shadow") && n != "shadowAngle" => 16,
@@ -1031,7 +1042,7 @@ mod tests {
 
     #[test]
     fn elytra_and_cloud_height_uniforms_are_written() {
-        assert!(NAMES.ends_with(&["isElytraFlying", "cloudHeight"]));
+        assert!(NAMES.ends_with(&["isElytraFlying", "cloudHeight", "lightningBoltPosition"]));
         let mut out = vec![0u8; 16];
         Value::i(&[1]).write("bool", &mut out, 0);
         assert_eq!(i32::from_ne_bytes(out[0..4].try_into().unwrap()), 1);
