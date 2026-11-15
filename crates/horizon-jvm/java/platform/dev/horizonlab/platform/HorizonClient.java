@@ -2731,10 +2731,18 @@ public final class HorizonClient {
         var manager = new net.minecraft.server.packs.resources.MultiPackResourceManager(type, packs);
         // The client's resource manager (Minecraft.getResourceManager: Xaero reads its radar
         // icons' definitions there), over the same packs.
+        // Listeners mods put in that manager's own list as it is made (Subtle Effects' splash
+        // types, added first: its fluid definitions read them), which vanilla's reload runs with
+        // the rest: run here, before the mods' Fabric listeners. (UMP, 2026-11-15)
+        java.util.List<net.minecraft.server.packs.resources.PreparableReloadListener> managerListeners = java.util.List.of();
         try {
             var reloadable = new net.minecraft.server.packs.resources.ReloadableResourceManager(type);
             set(net.minecraft.server.packs.resources.ReloadableResourceManager.class, reloadable, "resources", manager);
             set(Minecraft.class, minecraft, "resourceManager", reloadable);
+            @SuppressWarnings("unchecked")
+            var own = (java.util.List<net.minecraft.server.packs.resources.PreparableReloadListener>)
+                    field(net.minecraft.server.packs.resources.ReloadableResourceManager.class, reloadable, "listeners");
+            if (own != null) managerListeners = new java.util.ArrayList<>(own);
         } catch (Throwable t) {
             Natives.log("Horizon's client: no client resource manager: " + t);
         }
@@ -2754,7 +2762,23 @@ public final class HorizonClient {
         java.util.concurrent.Executor here = Runnable::run;
         int ran = 0;
         int skipped = 0;
-        for (var listener : new java.util.ArrayList<>(listeners)) {
+        // In the order the mods asked for (ResourceLoader.addListenerOrdering), as the game's reload
+        // sorts them: Subtle Effects' fluid definitions read its splash types, loaded by another of
+        // its listeners, and found none ("Splash type ... not found") when run first. (UMP, 2026-11-15)
+        java.util.List<net.minecraft.server.packs.resources.PreparableReloadListener> ordered = new java.util.ArrayList<>(listeners);
+        try {
+            ordered = new java.util.ArrayList<>(net.fabricmc.fabric.impl.resource.ResourceLoaderImpl.sort(type, ordered));
+        } catch (Throwable t) {
+            Natives.log("Horizon's client: the mods' reload listeners keep their registration order: " + t);
+        }
+        for (int i = managerListeners.size() - 1; i >= 0; i--) {
+            var own = managerListeners.get(i);
+            // The game's own (vanilla's, Fabric's marker) have nothing to load into here.
+            String name = own.getClass().getName();
+            if (name.startsWith("net.minecraft.") || name.startsWith("net.fabricmc.") || ordered.contains(own)) continue;
+            ordered.add(0, own);
+        }
+        for (var listener : ordered) {
             RELOADED.add(listener);
             if (afterModels(listener)) {
                 // Run with the models' reload instead (models()), after them as Fabric orders
