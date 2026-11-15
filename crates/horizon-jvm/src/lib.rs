@@ -606,14 +606,13 @@ fn create_vm(
             option_path(log_config)?.display()
         ),
         format!("-Djava.class.path={}", joined.to_string_lossy()),
-        // The heap gives back what it doesn't use: G1 keeps all it ever grew to otherwise (a
-        // 107-jar pack: 555 MB live in 1.2-1.5 GB committed), and the game's own memory is
-        // in the same process. Shrinks after full GCs and concurrent cycles; the periodic cycle
-        // lets an idle heap shrink too.
-        "-XX:+UseG1GC".into(),
-        "-XX:MinHeapFreeRatio=10".into(),
-        "-XX:MaxHeapFreeRatio=30".into(),
-        "-XX:G1PeriodicGCInterval=30000".into(),
+        // ZGC: the mods' collections run beside the game instead of pausing it. With 100 mods G1's
+        // young and mixed pauses (20-56 ms, every second or so in a 3 GB heap) were the stutters
+        // of a flight: UMP perf_test, 3 runs each, 1% low 65-70 fps with ZGC against 47-50 with
+        // G1, averages the same. It gives back memory it doesn't use (ZUncommit, on by default),
+        // as the G1 settings here did: the game's own memory is in the same process. (UMP, 2026-11-11)
+        "-XX:+UseZGC".into(),
+        "-XX:ZUncommitDelay=60".into(),
         // Mods' identifiers and the mirror's names repeat: ~1.3M strings in a big pack.
         "-XX:+UseStringDeduplication".into(),
         // Mods' online checks (update checkers, Patreon lists: Xaero's maps) opened with
