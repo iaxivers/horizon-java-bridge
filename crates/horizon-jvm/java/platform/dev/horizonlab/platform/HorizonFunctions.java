@@ -82,8 +82,13 @@ public final class HorizonFunctions {
      */
     private static volatile long settleAt = -1;
     private static volatile long gameTime;
-    /** How long after load scheduled events still hold the first player (10 s). */
-    private static final long SETTLE_TICKS = 200;
+    /**
+     * How long after load scheduled events still hold the first player (3 s). Skyblock Infinite places its
+     * island 2 s after load: covered. Repeating clocks (Incendium's 7 s, other structure mods') are not
+     * first-moment setup: waiting a whole period for them added 7 s to every join of a 100-mod pack
+     * (UMP load test), and vanilla waits for no scheduled function at all.
+     */
+    private static final long SETTLE_TICKS = 60;
 
     /** Whether the load functions have run (or won't: no data, a failure), and what they scheduled for the first seconds. */
     static boolean ready() {
