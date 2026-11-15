@@ -227,8 +227,14 @@ fn modrinth_answers() {
     assert_eq!(sodium.kind, Kind::Mod);
     assert_eq!(sodium.page, "https://modrinth.com/mod/sodium");
     assert!(matches!(sodium.support(), Support::Partial(_)));
-    // Data packs, plugins and shader packs are not.
-    for project_type in ["plugin", "shader"] {
+    // A shader pack is offered: the game runs the shaders/ format.
+    let hit = json!({"project_id": "HVnmMxH1", "project_type": "shader", "slug": "bsl-shaders",
+        "versions": ["26.3"], "categories": ["iris", "optifine"]});
+    let bsl = modrinth::parse_hit(&hit).unwrap();
+    assert_eq!(bsl.kind, Kind::Shader);
+    assert_eq!(bsl.support(), Support::Works);
+    // Plugins are not.
+    for project_type in ["plugin"] {
         let hit = json!({"project_id": "x", "project_type": project_type, "slug": "p"});
         assert!(modrinth::parse_hit(&hit).is_none(), "{project_type}");
     }

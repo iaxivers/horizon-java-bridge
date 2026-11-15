@@ -206,6 +206,7 @@ impl JavaGame {
         crate::browser::java_instance::Target {
             minecraft: self.minecraft.clone(),
             loader: self.loader.as_ref().map(|l| l.kind.id().to_string()),
+            bridge: false,
         }
     }
 }

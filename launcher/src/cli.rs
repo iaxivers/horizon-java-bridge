@@ -2391,10 +2391,11 @@ fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
         ModsCmd::Check { .. } => None,
     };
     // A Java instance gets the source's own files, for its version and loader.
-    let java = instance
-        .as_ref()
-        .and_then(|i| i.java.as_ref())
-        .map(|j| j.target());
+    // A Horizon instance with Fabric 26.3 mods on: its mods are Fabric jars in mods-java/.
+    let java = instance.as_ref().and_then(|i| match &i.java {
+        Some(j) => Some(j.target()),
+        None => i.java_mods.then(java_instance::Target::bridge),
+    });
     let home = match (&action, instance) {
         (ModsCmd::Search { .. }, _) | (_, None) => backend::game_home(),
         (_, Some(i)) => i.home,

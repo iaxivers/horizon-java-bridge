@@ -309,7 +309,9 @@ pub fn support(kind: Kind, game_versions: &[String], loaders: &[String]) -> Supp
         Kind::Modpack => {
             Support::Partial("Horizon runs the mods it can port, from your own downloads.".into())
         }
-        Kind::Shader => Support::No("Not one of Horizon's own shader packs.".into()),
+        // The shaders/ format (OptiFine and Iris packs): the game runs them (Options > Horizon
+        // Settings > Shader Packs). Iris's own releases list "iris" or "optifine" as the loader.
+        Kind::Shader => Support::Works,
         Kind::DataPack => {
             let made_for = match newest_release(game_versions) {
                 _ if game_versions.iter().any(|v| v == GAME) => String::new(),

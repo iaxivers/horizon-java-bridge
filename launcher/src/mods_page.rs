@@ -919,10 +919,11 @@ impl Launcher {
     /// go into the selected instance: picking another reads its list.
     pub(super) fn mods_load(&mut self) {
         let home = self.selected_instance().map(|i| i.home.clone());
-        let java = self
-            .selected_instance()
-            .and_then(|i| i.java.as_ref())
-            .map(|j| j.target());
+        // A Horizon instance with Fabric 26.3 mods on: its mods are Fabric jars in mods-java/.
+        let java = self.selected_instance().and_then(|i| match &i.java {
+            Some(j) => Some(j.target()),
+            None => i.java_mods.then(java_instance::Target::bridge),
+        });
         // Another version or loader: other results, on the page's next draw.
         if java != self.mods.java {
             self.mods.asked = false;

@@ -102,6 +102,7 @@ fn target(minecraft: &str, loader: Option<&str>) -> Target {
     Target {
         minecraft: minecraft.into(),
         loader: loader.map(Into::into),
+        bridge: false,
     }
 }
 
