@@ -794,6 +794,111 @@ public final class HorizonWorldgen {
     }
 
     /**
+     * The leaves of each of the dimension's biomes' trees, "biome=state", the first tree a biome's
+     * features place (its weighted and random selectors walked too): far terrain's canopies come
+     * from Horizon's own trees, and take these in the mods' biomes (Biomes O' Plenty's fir and
+     * maple forests drew vanilla oak). A provider that needs the level (rare) is skipped. Null if
+     * the mods don't generate the dimension. (UMP, 2026-11-12)
+     */
+    public static String[] lodFoliage(String dimension) {
+        Thread.currentThread().setContextClassLoader(HorizonWorldgen.class.getClassLoader());
+        Dimension d = DIMENSIONS.get(dimension);
+        if (d == null) return null;
+        List<String> out = new ArrayList<>();
+        var random = net.minecraft.util.RandomSource.create(0);
+        for (var biome : d.generator.getBiomeSource().possibleBiomes()) {
+            var id = biome.unwrapKey().map(k -> k.identifier().toString()).orElse(null);
+            // Vanilla's biomes keep Horizon's own trees (vanilla's): only the mods' are asked.
+            if (id == null || id.startsWith("minecraft:")) continue;
+            // The leaves most of its trees have (a coniferous forest's firs, not the one poplar it
+            // also lists first).
+            java.util.Map<BlockState, Integer> counts = new java.util.HashMap<>();
+            for (var step : biome.value().getGenerationSettings().features()) {
+                for (var placed : step) treeLeaves(placed.value().getFeatures(), random, 0, counts);
+            }
+            counts.entrySet().stream().max(java.util.Map.Entry.comparingByValue()).ifPresent(e ->
+                    out.add(id + "=" + net.minecraft.commands.arguments.blocks.BlockStateParser.serialize(e.getKey())));
+        }
+        return out.toArray(String[]::new);
+    }
+
+    /**
+     * The leaves a feature of a mod's own type places, from its encoded form: the block of a
+     * field named like "foliage", else the first block id ending in "_leaves" (a configured
+     * feature's codec writes its providers as block states). Null for anything else.
+     */
+    private static BlockState ownTreeLeaves(Holder<net.minecraft.world.level.levelgen.feature.Feature> holder) {
+        var feature = holder.value();
+        if (feature.getClass().getName().startsWith("net.minecraft.")) return null;
+        try {
+            var ops = net.minecraft.resources.RegistryOps.create(com.mojang.serialization.JsonOps.INSTANCE,
+                    HorizonData.loaded.registries().compositeAccess());
+            var json = net.minecraft.world.level.levelgen.feature.Feature.DIRECT_CODEC.encodeStart(ops, feature).result().orElse(null);
+            if (json == null) return null;
+            String leaves = findLeaves(json, false);
+            if (leaves == null) return null;
+            var block = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getOptional(net.minecraft.resources.Identifier.parse(leaves)).orElse(null);
+            return block == null ? null : block.defaultBlockState();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** A leaves block id in {@code json}: under a "foliage" key first, else any "..._leaves". */
+    private static String findLeaves(com.google.gson.JsonElement json, boolean anyLeaves) {
+        if (json.isJsonObject()) {
+            var object = json.getAsJsonObject();
+            if (!anyLeaves) {
+                for (var entry : object.entrySet()) {
+                    if (entry.getKey().contains("foliage")) {
+                        String found = findLeaves(entry.getValue(), true);
+                        if (found != null) return found;
+                    }
+                }
+            }
+            for (var entry : object.entrySet()) {
+                String found = findLeaves(entry.getValue(), anyLeaves);
+                if (found != null) return found;
+            }
+        } else if (json.isJsonArray()) {
+            for (var element : json.getAsJsonArray()) {
+                String found = findLeaves(element, anyLeaves);
+                if (found != null) return found;
+            }
+        } else if (json.isJsonPrimitive() && json.getAsJsonPrimitive().isString()) {
+            String s = json.getAsString();
+            if (s.endsWith("_leaves") && s.contains(":")) return s;
+        }
+        return null;
+    }
+
+    /** Counts the leaves of every tree among {@code features} and their sub-features. */
+    private static void treeLeaves(java.util.stream.Stream<Holder<net.minecraft.world.level.levelgen.feature.Feature>> features,
+            net.minecraft.util.RandomSource random, int depth, java.util.Map<BlockState, Integer> counts) {
+        if (depth > 6) return;
+        for (var holder : (Iterable<Holder<net.minecraft.world.level.levelgen.feature.Feature>>) features::iterator) {
+            var feature = holder.value();
+            if (feature instanceof net.minecraft.world.level.levelgen.feature.TreeFeature tree) {
+                try {
+                    BlockState state = tree.foliageProvider().value().getState(null, random, BlockPos.ZERO);
+                    if (state != null && !state.isAir()) counts.merge(state, 1, Integer::sum);
+                } catch (RuntimeException e) {
+                    // A provider reading the level: not counted.
+                }
+                continue;
+            }
+            // A mod's own tree type (Biomes O' Plenty's taiga_tree): its saved form names its
+            // leaves (a "foliage" provider, or any leaves block it places).
+            BlockState own = ownTreeLeaves(holder);
+            if (own != null) {
+                counts.merge(own, 1, Integer::sum);
+                continue;
+            }
+            treeLeaves(feature.getSubFeatures(), random, depth + 1, counts);
+        }
+    }
+
+    /**
      * Far terrain's noise for a dimension the mods generate: "vanilla" when its land is
      * vanilla's noise (Horizon's own stands for it), "" when the mods' noise was written into
      * {@code dir} as a data pack (HorizonNoiseExport), else why it couldn't be.

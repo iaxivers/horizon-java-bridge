@@ -1003,6 +1003,10 @@ public final class HorizonServer {
         return HorizonWorldgen.lodMaterials(dimension);
     }
 
+    public static String[] worldgenLodFoliage(String dimension) {
+        return HorizonWorldgen.lodFoliage(dimension);
+    }
+
     public static String worldgenLodNoise(String dimension, String dir) {
         return HorizonWorldgen.lodNoise(dimension, dir);
     }

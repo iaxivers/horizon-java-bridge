@@ -2612,6 +2612,32 @@ pub fn worldgen_lod_materials(dimension: &str) -> Result<Option<Vec<String>>, St
     Ok(names.flatten())
 }
 
+/// Each biome's tree leaves, `(biome, state)` (`HorizonWorldgen.lodFoliage`): far canopies
+/// in the mods' biomes. None if the mods don't generate the dimension.
+pub fn worldgen_lod_foliage(dimension: &str) -> Result<Option<Vec<(String, String)>>, String> {
+    let pairs = with_server(|env, class| {
+        let dimension = env.new_string(dimension)?;
+        let pairs = env
+            .call_static_method(
+                class,
+                "worldgenLodFoliage",
+                "(Ljava/lang/String;)[Ljava/lang/String;",
+                &[JValue::Object(&dimension)],
+            )?
+            .l()?;
+        if pairs.is_null() {
+            return Ok(None);
+        }
+        string_array(env, pairs).map(Some)
+    })?;
+    Ok(pairs.flatten().map(|pairs| {
+        pairs
+            .into_iter()
+            .filter_map(|p| p.split_once('=').map(|(b, s)| (b.to_string(), s.to_string())))
+            .collect()
+    }))
+}
+
 /// Far columns of a dimension a mod's own generator makes (`HorizonWorldgen.lodColumns`:
 /// ChunkGenerator.getBaseColumn), each as runs from the bottom, `(from_y, to_y, state)` with
 /// `to_y` exclusive. None if the mods don't generate the dimension.
