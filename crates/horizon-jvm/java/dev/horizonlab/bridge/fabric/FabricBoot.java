@@ -83,7 +83,7 @@ public final class FabricBoot {
             }
         }
         try {
-            loader.invokeEntrypoints("main", ModInitializer.class, ModInitializer::onInitialize);
+            timedEntrypoints(loader, "main", ModInitializer.class, ModInitializer::onInitialize);
         } catch (RuntimeException e) {
             // Fabric stops every mod for one that fails here: say where, then give up as it does.
             Throwable root = e;
@@ -102,7 +102,7 @@ public final class FabricBoot {
             // Every client entrypoint runs, then Fabric throws what failed: a mod whose client
             // code needs more of a client than the headless one has loses that, not the rest.
             try {
-                loader.invokeEntrypoints("client", ClientModInitializer.class, ClientModInitializer::onInitializeClient);
+                timedEntrypoints(loader, "client", ClientModInitializer.class, ClientModInitializer::onInitializeClient);
             } catch (RuntimeException e) {
                 Throwable root = e;
                 while (root.getCause() != null && root.getCause() != root) root = root.getCause();
@@ -197,5 +197,36 @@ public final class FabricBoot {
     public static Class<?> gameClass(String name) throws ClassNotFoundException {
         if (gameLoader == null) throw new IllegalStateException("Fabric Loader is not started");
         return Class.forName(name.replace('/', '.'), true, gameLoader);
+    }
+
+    /**
+     * Fabric's invokeEntrypoints, timing each mod's (UMP, 2026-11-11): with HORIZON_JAVA_INIT_TIMES set, or always
+     * for the slow ones (over 500 ms), one line each, so a slow start names the mods it waits for. Failures are
+     * collected and thrown at the end as Fabric's own does, so one mod's failure doesn't skip the rest.
+     */
+    private static <T> void timedEntrypoints(FabricLoaderImpl loader, String key, Class<T> type,
+                                             java.util.function.Consumer<? super T> invoker) {
+        boolean all = System.getenv("HORIZON_JAVA_INIT_TIMES") != null;
+        RuntimeException failed = null;
+        java.util.List<String> slow = new java.util.ArrayList<>();
+        long total = System.nanoTime();
+        for (var container : loader.getEntrypointContainers(key, type)) {
+            long started = System.nanoTime();
+            try {
+                invoker.accept(container.getEntrypoint());
+            } catch (Throwable t) {
+                RuntimeException e = new RuntimeException("Could not execute entrypoint stage '" + key
+                        + "' due to errors, provided by '" + container.getProvider().getMetadata().getId() + "'", t);
+                if (failed == null) failed = e;
+                else failed.addSuppressed(e);
+            }
+            long ms = (System.nanoTime() - started) / 1_000_000;
+            if (all || ms >= 500) slow.add(container.getProvider().getMetadata().getId() + " " + ms + " ms");
+        }
+        if (!slow.isEmpty() || all) {
+            Natives.log("Java mods: '" + key + "' entrypoints took " + (System.nanoTime() - total) / 1_000_000
+                    + " ms" + (slow.isEmpty() ? "" : "; slowest: " + String.join(", ", slow)));
+        }
+        if (failed != null) throw failed;
     }
 }
