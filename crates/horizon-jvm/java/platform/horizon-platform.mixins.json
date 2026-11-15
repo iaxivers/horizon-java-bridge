@@ -6,6 +6,7 @@
   "mixins": [
     "EntityAccess",
     "TemplateCacheMixin",
+    "TemplatePaletteMixin",
     "ServerCommonListenerAccess",
     "PlayerListAccess",
     "MinecraftServerAccess",
