@@ -2985,6 +2985,36 @@ const STAMP: &str = "horizon-mod-content.stamp";
 /// [`STAMP`]'s name: whether a content root was built before.
 pub const STAMP_FILE: &str = STAMP;
 
+/// Every file under `dir` (its `assets` and `data`) with its size and modification time (ns
+/// since the epoch), from the folders' listings.
+fn listed_meta(dir: &Path) -> std::collections::HashMap<String, (u64, u128)> {
+    fn walk(dir: &Path, rel: &str, out: &mut std::collections::HashMap<String, (u64, u128)>) {
+        let Ok(read) = fs::read_dir(dir) else { return };
+        for entry in read.flatten() {
+            let Ok(m) = entry.metadata() else { continue };
+            let Some(name) = entry.file_name().to_str().map(|n| format!("{rel}/{n}")) else {
+                continue;
+            };
+            if m.is_dir() {
+                walk(&entry.path(), &name, out);
+            } else if m.is_file() {
+                let modified = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .unwrap_or_default()
+                    .as_nanos();
+                out.insert(name, (m.len(), modified));
+            }
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for top in ["assets", "data"] {
+        walk(&dir.join(top), top, &mut out);
+    }
+    out
+}
+
 /// What a content root is built from: this build of the game, the base's
 /// manifest and the tables [`build`] rewrites, and every file of every mod
 /// in order. Files count by size and modification time, as build tools do.
@@ -3027,8 +3057,18 @@ fn stamp(base: &Path, mods: &[ContentMod]) -> Result<String> {
         if m.content.files.is_empty() {
             // Declared in code only: nothing to read.
         } else if source.is_dir() {
+            // Each file's size and time from its folder's listing (Windows gives them with the
+            // directory read), not a stat per file: 200k stats took 16 s of every start with a
+            // big pack. The same text per file as `meta`. (UMP, 2026-11-14)
+            let listed = listed_meta(source);
             for file in &m.content.files {
-                parts.push(meta(&source.join(file))?);
+                let path = source.join(file);
+                match listed.get(file.as_str()) {
+                    Some((len, modified)) => {
+                        parts.push(format!("{} {len} {modified}", path.display()))
+                    }
+                    None => parts.push(meta(&path)?),
+                }
             }
         } else {
             parts.push(meta(source)?);
