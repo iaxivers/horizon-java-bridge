@@ -2749,6 +2749,8 @@ public final class HorizonClient {
                 Natives.log("Horizon's client: the GPU's shaders couldn't be loaded: " + t);
             }
         }
+        // The entity render dispatcher, which Minecraft's constructor makes before this reload.
+        HorizonEntityRender.dispatcher();
         java.util.concurrent.Executor here = Runnable::run;
         int ran = 0;
         int skipped = 0;

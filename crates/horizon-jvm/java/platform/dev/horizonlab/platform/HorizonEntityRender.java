@@ -127,6 +127,20 @@ public final class HorizonEntityRender {
     }
 
     /**
+     * The client's entity render dispatcher (Minecraft.getEntityRenderDispatcher) made now, as
+     * Minecraft's constructor makes it before its first resource reload: mods' reload listeners
+     * read it (Kiwi's player renderers: getEntityRenderDispatcher().getPlayerRenderers() was null,
+     * and its reload failed). (UMP, 2026-11-15)
+     */
+    static void dispatcher() {
+        try {
+            context();
+        } catch (Throwable t) {
+            Natives.log("Java mods: the client's entity renderers couldn't be made before its reload: " + t);
+        }
+    }
+
+    /**
      * The client's models are in (HorizonClient.finishModels): the renderers' contexts are made
      * again with its block models, and renderers that failed for want of them are tried again.
      */
