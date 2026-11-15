@@ -470,7 +470,16 @@ fn class_archive(jars: &[PathBuf]) -> Option<PathBuf> {
         return None;
     }
     let cache = super::super::mods::horizon_cache();
-    let name = format!("java-classes-{}.jsa", horizon_jvm::content::stamp(jars));
+    // The JVM maps an archive only while its class path is the one it was written with, jar
+    // sizes and times included (CDS's "shared class paths mismatch"); the bridge's own jar is
+    // rewritten by a game update, and the archive was then silently unused: 1,480 of 85,000
+    // classes came from it with 184 mods (UMP, 2026-11-14). This game build (its executable)
+    // is in the name, so an update archives the classes again.
+    let mut stamped = jars.to_vec();
+    if let Ok(exe) = std::env::current_exe() {
+        stamped.push(exe);
+    }
+    let name = format!("java-classes-{}.jsa", horizon_jvm::content::stamp(&stamped));
     if let Ok(entries) = std::fs::read_dir(&cache) {
         for entry in entries.flatten() {
             let other = entry.file_name().to_string_lossy().into_owned();
