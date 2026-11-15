@@ -1585,7 +1585,18 @@ public final class HorizonServer {
             for (ServerLevel made : new ArrayList<>(LEVELS.values())) levelLoaded(made);
             hook(server, MinecraftServer.class, "loadLevel", "()V", "RETURN", NO_ARGUMENTS);
             hook(server, MinecraftServer.class, "loadLevel", "()V", "TAIL", NO_ARGUMENTS);
-            fireEach("ServerLifecycleEvents.SERVER_STARTED", ServerLifecycleEvents.SERVER_STARTED, l -> l.onServerStarted(server));
+            // The world spawn a started server has (its command source runs at it: Spawn Animations
+        // sends its config as a command at SERVER_STARTED and got a null spawn). (UMP, 2026-11-11)
+        try {
+            java.lang.reflect.Field respawn = MinecraftServer.class.getDeclaredField("effectiveRespawnData");
+            respawn.setAccessible(true);
+            if (respawn.get(server) == null && server.getWorldData() != null) {
+                respawn.set(server, server.getWorldData().overworldData().getRespawnData());
+            }
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            // Not there to give: a mod using it says so.
+        }
+        fireEach("ServerLifecycleEvents.SERVER_STARTED", ServerLifecycleEvents.SERVER_STARTED, l -> l.onServerStarted(server));
         }
         // MinecraftServer.tickServer's head (Fabric's START_SERVER_TICK is its own injection there).
         Object[] haveTime = {(java.util.function.BooleanSupplier) () -> true};
