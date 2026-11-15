@@ -661,6 +661,35 @@ public final class HorizonServer {
                         Natives.log("Java mods: a level has no environment attributes: " + e);
                     }
                 });
+                // Its structure manager, which a level the mods generate gets with its generation
+                // (HorizonWorldgen.readyLevel). A level Horizon generates had none, and every mod
+                // asking it where a structure is (Lithostitched's tick, Incendium's location
+                // predicates) failed each tick: one over a check that finds no structures (Horizon
+                // places them there; none are in the mirror's chunks). (UMP, 2026-11-12)
+                try {
+                    java.lang.reflect.Field manager = ServerLevel.class.getDeclaredField("structureManager");
+                    manager.setAccessible(true);
+                    if (manager.get(level) == null && server != null && server.getWorldGenSettings() != null) {
+                        net.minecraft.world.level.chunk.storage.ChunkScanAccess none =
+                                (pos, visitor) -> java.util.concurrent.CompletableFuture.completedFuture(null);
+                        var generator = HorizonServer.generator(level);
+                        if (generator != null) {
+                            var settings = generator instanceof net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator noise
+                                    ? noise.generatorSettings().value()
+                                    : registries.lookupOrThrow(Registries.NOISE_SETTINGS)
+                                            .getOrThrow(net.minecraft.world.level.levelgen.NoiseGeneratorSettings.OVERWORLD).value();
+                            var random = net.minecraft.world.level.levelgen.RandomState.create(
+                                    registries.lookupOrThrow(Registries.NOISE), seed, settings);
+                            var check = new net.minecraft.world.level.levelgen.structure.StructureCheck(none, registries,
+                                    server.getStructureTemplateManager(), k, generator, random,
+                                    level, generator.getBiomeSource(), seed, server.getFixerUpper());
+                            manager.set(level, new net.minecraft.world.level.StructureManager(level,
+                                    server.getWorldGenSettings().options(), check));
+                        }
+                    }
+                } catch (ReflectiveOperationException | RuntimeException e) {
+                    Natives.log("Java mods: a level has no structure manager: " + e);
+                }
             }
             return level;
         });
