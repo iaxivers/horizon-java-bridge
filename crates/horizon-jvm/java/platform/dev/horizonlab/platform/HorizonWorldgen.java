@@ -253,7 +253,7 @@ public final class HorizonWorldgen {
                     ? HorizonServer.worldDir().resolve("horizon-java").resolve("levels")
                     : java.nio.file.Files.createTempDirectory("horizon-java-levels");
             java.nio.file.Files.createDirectories(base);
-            var storage = net.minecraft.world.level.storage.LevelStorageSource.createDefault(base).createAccess("world");
+            var storage = storage(base);
             HorizonData.Loaded data = HorizonData.loaded;
             var stem = new net.minecraft.server.WorldStem(data.resources(), data.reloadable(), data.registries(),
                     new net.minecraft.world.level.storage.LevelDataAndDimensions.WorldDataAndGenSettings(
@@ -262,6 +262,30 @@ public final class HorizonWorldgen {
                     java.net.Proxy.NO_PROXY, server.getFixerUpper(), HorizonServer.services(), null, false, null};
         } catch (Throwable t) {
             Natives.log("Java mods: no server arguments for mods' set-up: " + t);
+            return null;
+        }
+    }
+
+    /** The bridge's own world storage for mods' set-up (one a process: it holds the folder's lock). */
+    private static net.minecraft.world.level.storage.LevelStorageSource.LevelStorageAccess storageAccess;
+
+    private static synchronized net.minecraft.world.level.storage.LevelStorageSource.LevelStorageAccess storage(
+            java.nio.file.Path base) throws java.io.IOException {
+        if (storageAccess == null) {
+            storageAccess = net.minecraft.world.level.storage.LevelStorageSource.createDefault(base).createAccess("world");
+        }
+        return storageAccess;
+    }
+
+    /** That storage for a level's constructor hooks, made if the server's start hasn't: null if it can't be. */
+    static net.minecraft.world.level.storage.LevelStorageSource.LevelStorageAccess levelStorage() {
+        try {
+            java.nio.file.Path base = HorizonServer.worldDir() != null
+                    ? HorizonServer.worldDir().resolve("horizon-java").resolve("levels")
+                    : java.nio.file.Files.createTempDirectory("horizon-java-levels");
+            java.nio.file.Files.createDirectories(base);
+            return storage(base);
+        } catch (Throwable t) {
             return null;
         }
     }
@@ -280,7 +304,9 @@ public final class HorizonWorldgen {
     private static void levelHooks(ServerLevel level, String dimension, long seed) {
         var stem = HorizonData.stem(level.dimension().identifier());
         if (stem == null) return;
-        Object[] args = {HorizonServer.server(), (java.util.concurrent.Executor) Runnable::run, null,
+        // The world's storage as a server's (BCLib/BetterEnd read its level id there): the bridge's
+        // own folder beside Horizon's world, not Horizon's files. (UMP, 2026-11-11)
+        Object[] args = {HorizonServer.server(), (java.util.concurrent.Executor) Runnable::run, levelStorage(),
                 HorizonData.loaded.worldData(), level.dimension(), stem, false,
                 net.minecraft.world.level.biome.BiomeManager.obfuscateSeed(seed), List.of(), true};
         for (String at : new String[] {"RETURN", "TAIL"}) {

@@ -1476,6 +1476,11 @@ public final class HorizonHooks {
 
     private static Object argument(Class<?> owner, Object self, Class<?> type, java.lang.reflect.Type generic) {
         if (type.isPrimitive()) return zero(type);
+        // A level's world storage (ServerLevel's constructor: BCLib reads its level id): the
+        // bridge's own, beside Horizon's world (HorizonWorldgen.levelStorage). (UMP, 2026-11-11)
+        if (type == net.minecraft.world.level.storage.LevelStorageSource.LevelStorageAccess.class) {
+            return HorizonWorldgen.levelStorage();
+        }
         // A level's stem (ServerLevel's constructor: its generator, which BCLib's and BetterEnd's
         // handlers read), from the registries by the level's dimension.
         if (type == net.minecraft.world.level.dimension.LevelStem.class && self instanceof net.minecraft.world.level.Level level) {
