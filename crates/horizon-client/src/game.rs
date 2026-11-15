@@ -22264,6 +22264,12 @@ pub fn run_with() -> Result<()> {
     // Before any worker starts: on Linux they go behind the server thread
     // and the render thread.
     horizon_threads::put_helpers_behind();
+    // Java mods' world generation and threads beside the worker pools: two cores kept for the
+    // frame and the tick (horizon_threads::spare_cores).
+    #[cfg(feature = "java-mods")]
+    if !java_mods::mod_jars().1.is_empty() {
+        horizon_threads::spare_cores(2);
+    }
     if options.execution_role.is_client() {
         // The render thread, like the server thread, ahead of the workers on
         // macOS and Windows. While terrain loads, the workers
