@@ -722,6 +722,17 @@ pub fn shared_data_with(
     {
         return Ok(data.clone());
     }
+    // A load the cache held another set of packs for (the launch's preload): what differs,
+    // as the reason the world waits for this load.
+    if let Some((_, other, _)) = cache
+        .iter()
+        .find(|(path, o, _)| path == dir && !o.is_empty() && o != overrides)
+    {
+        log::info!(
+            "Horizon: worldgen data loaded again: the packs differ from the preloaded in {}",
+            overrides.differences(other).join(", ")
+        );
+    }
     let started = std::time::Instant::now();
     let data = GeneratorData::load_with(dir, registry, overrides)?;
     log::info!("Horizon: worldgen data loaded in {:?}", started.elapsed());

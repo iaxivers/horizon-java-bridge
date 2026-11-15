@@ -435,6 +435,22 @@ pub(super) fn preload_launch_world(
             // Not behind the server: the world's opening waits for it.
             let started = std::time::Instant::now();
             let sync = spawn_sync_preload(&resources, false);
+            // The plain bundle too, which bone meal's and saplings' features read
+            // (`install_live_features`) as the world opens: with a world's data packs (a big Java
+            // mod pack's structures) it isn't the same data, and was read then, 8-11 s of the
+            // join with 100 mods. (UMP, 2026-11-13)
+            let plain = {
+                let resources = resources.clone();
+                std::thread::Builder::new()
+                    .name("World data preload".into())
+                    .spawn(move || {
+                        let _ = horizon_client::vanillagen::shared_data(
+                            &resources.join("worldgen"),
+                            registry,
+                        );
+                    })
+                    .ok()
+            };
             // Errors are left for the world opening to report. The world's
             // flags from its level.dat: the feature packs a flag forces on.
             let enabled_features = horizon_client::save::Level::read(&world_root)
@@ -459,6 +475,9 @@ pub(super) fn preload_launch_world(
                 &horizon_world::loot::PackOverlay::NONE,
             );
             join_sync_preload(sync, &resources);
+            if let Some(plain) = plain {
+                let _ = plain.join();
+            }
             log::info!(
                 "Horizon: world data preloaded for the launch's world in {} ms",
                 started.elapsed().as_millis()
