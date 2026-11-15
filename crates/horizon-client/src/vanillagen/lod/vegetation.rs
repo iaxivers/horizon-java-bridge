@@ -12,6 +12,12 @@ use horizon_world::{
 };
 use serde_json::Value;
 
+/// The share of a wide cell (16 blocks or more) its crowns must fill at one height for the cell to
+/// draw as treetops. Matched to real chunks reduced to such cells (`Column::reduced` keeps leaves
+/// where a quarter of the cell holds them at one height; this estimate places trees on level
+/// ground, so it needs more): forest cells 42% real, drawn 65% at 0.35, 32% at 0.45
+/// (far_tree_cover_follows_real_chunks, 2026-11-15).
+const WIDE_COVER: f64 = 0.4;
 /// The widest LOD cell that draws chorus: a cell is drawn as a full-footprint
 /// column, so a one-block plant in a wider cell would read as a coloured slab.
 const CHORUS_CELL: i32 = 4;
@@ -345,10 +351,14 @@ impl Vegetation {
         if width >= 16 {
             let n = hash(self.seed, x.div_euclid(4), z.div_euclid(4));
             let tree = choose(n);
-            let coverage = 1.
-                - (-total * f64::from(tree.radius * tree.radius) * std::f64::consts::PI / 256.)
-                    .exp();
-            if coverage >= 0.25 {
+            // The cell's own trees, as the narrow cells place them (one chance per 4x4 block
+            // cell): the share of the cell their crowns cover. A real chunk reduced to this cell
+            // keeps leaves only where a quarter of it holds them (`Column::reduced`); the
+            // biome's mean density alone passed that in every wooded cell, so far forests were
+            // one solid sheet (73% of 16-wide forest cells drawn as trees, real chunks 37%;
+            // far_tree_cover_follows_real_chunks). (UMP, 2026-11-15)
+            let coverage = self.crown_cover(trees, total, x - width / 2, z - width / 2, width);
+            if coverage >= WIDE_COVER {
                 // A wide cell is one block-textured box: its crown as high as a full tree drew
                 // 16x16 slabs of leaves over every wooded cell, the square boxes of far forests
                 // (user, 2026-11-14). The box is as high as the cell's trees are on average: full
@@ -426,6 +436,57 @@ impl Vegetation {
                 ..surface
             });
         }
+    }
+    /// The largest share of the `width`-wide cell at (`x0`, `z0`) its trees' crowns fill at one
+    /// height, as `Column::reduced` counts a real chunk's leaves: crowns of different heights
+    /// don't add up. Trees are placed as the narrow cells place them (a 4x4 block grid, one
+    /// chance each), on level ground; sampled on a grid of at most 16x16 points.
+    fn crown_cover(&self, trees: &[Tree], total: f64, x0: i32, z0: i32, width: i32) -> f64 {
+        let chance = (total / 16.).min(1.);
+        let radius = trees.iter().map(|t| t.radius).max().unwrap_or(2);
+        // Each crown: trunk position, radius², and its leaves' heights above the ground.
+        let mut crowns = Vec::new();
+        for cz in (z0 - radius).div_euclid(4)..=(z0 + width + radius).div_euclid(4) {
+            for cx in (x0 - radius).div_euclid(4)..=(x0 + width + radius).div_euclid(4) {
+                let n = hash(self.seed, cx, cz);
+                if (n as u32 as f64 / u32::MAX as f64) >= chance {
+                    continue;
+                }
+                let mut left = (n.rotate_left(21) as u32 as f64 / u32::MAX as f64) * total;
+                let tree = trees
+                    .iter()
+                    .find(|t| {
+                        left -= t.count;
+                        left <= 0.
+                    })
+                    .unwrap_or(&trees[trees.len() - 1]);
+                let height = tree.height + ((n >> 40) % (tree.variation.max(0) + 1) as u64) as i32;
+                let tx = cx * 4 + ((n >> 32) & 3) as i32;
+                let tz = cz * 4 + ((n >> 34) & 3) as i32;
+                crowns.push((tx, tz, tree.radius, height - tree.radius, height + 2));
+            }
+        }
+        // Points covered at each height above the ground (0..64).
+        let mut at_height = [0u32; 64];
+        let step = (width / 16).max(1);
+        let mut points = 0u32;
+        for pz in (z0..z0 + width).step_by(step as usize) {
+            for px in (x0..x0 + width).step_by(step as usize) {
+                points += 1;
+                let mut here = [false; 64];
+                for &(tx, tz, r, bottom, top) in &crowns {
+                    if (px - tx).pow(2) + (pz - tz).pow(2) <= r * r {
+                        for h in bottom.clamp(0, 63)..top.clamp(0, 64) {
+                            here[h as usize] = true;
+                        }
+                    }
+                }
+                for (h, covered) in here.iter().enumerate() {
+                    at_height[h] += u32::from(*covered);
+                }
+            }
+        }
+        f64::from(at_height.iter().copied().max().unwrap_or(0)) / f64::from(points.max(1))
     }
     /// A chorus plant as its place-and-grow feature leaves it: a 2..=5 block
     /// stem under one fully grown flower, or a full-cell stand-in where the

@@ -1229,6 +1229,104 @@ mod tests {
     }
     /// Small End islands are decoration over the void, so the direct sampler
     /// has to estimate them from `end_island_decorated`.
+    /// Far tree cover against the real world: how many columns carry leaves on top in real
+    /// decorated chunks, and in the far estimate of the same columns (cells of 1 and 4). Prints the
+    /// share per biome; the estimate must stay within reach of the real cover. (UMP, 2026-11-15:
+    /// the user saw far land drawn with many more trees than the world has.)
+    #[test]
+    #[ignore = "requires prepared worldgen data in HORIZON_TEST_RESOURCES"]
+    fn far_tree_cover_follows_real_chunks() -> crate::Result<()> {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("HORIZON_TEST_RESOURCES").expect("resources"),
+        );
+        let assets = crate::assets::Assets::load(&root)?;
+        let biomes = crate::biome::Biomes::load(&root)?;
+        let terrain = Arc::new(VanillaTerrain::new(
+            &root.join("worldgen"),
+            assets.registry,
+            &biomes,
+            1234,
+        )?);
+        let mut sampler = VanillaLodSampler::new(terrain.clone());
+        let is_tree = |state: BlockStateId| {
+            let name = &assets.registry.state(state).unwrap().name;
+            name.ends_with("_leaves") || name.ends_with("_log")
+        };
+        // Real decorated chunks in a 12x12 chunk area, from the decoration worker.
+        // 6x6 chunks in each of nine areas a few kilometres apart (many biomes).
+        let keys: Vec<(i32, i32)> = [(-70, 3), (40, -120), (150, 60), (-200, -40), (90, 200), (-120, 160), (250, -200), (-260, 220), (10, 10), (-66, 0), (-75, 8), (-300, 300), (320, 40), (-20, -300), (180, -320)]
+            .iter()
+            .flat_map(|&(ax, az)| (0..6).flat_map(move |z| (0..6).map(move |x| (ax + x, az + z))))
+            .collect();
+        sampler.request_detail(&keys, [0, 0]);
+        let mut real = std::collections::HashMap::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while real.len() < keys.len() {
+            for (key, columns) in sampler.drain_details() {
+                real.insert(key, columns);
+            }
+            assert!(std::time::Instant::now() < deadline, "decoration worker stalled");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Per biome: (columns, real tree tops, estimated tree tops at width 1, at width 4, real at
+        // 16 reduced, estimated at 16).
+        let mut by_biome: std::collections::BTreeMap<String, [u32; 6]> = Default::default();
+        let mut fresh = VanillaLodSampler::new(terrain.clone());
+        for (&(cx, cz), columns) in &real {
+            for i in 0..256 {
+                let (x, z) = (cx * 16 + (i & 15) as i32, cz * 16 + (i >> 4) as i32);
+                let column = &columns[i];
+                let Some(surface) = column.surface else { continue };
+                let name = biomes.get(surface.biome).name.to_string();
+                let entry = by_biome.entry(name).or_default();
+                entry[0] += 1;
+                entry[1] += u32::from(column.spans.last().is_some_and(|s| is_tree(s.state)));
+                // The estimate of the same column, sampled straight from the generator.
+                let one = fresh.grid(x, z, 1, 1).pop().unwrap_or_default();
+                entry[2] += u32::from(one.spans.last().is_some_and(|s| is_tree(s.state)));
+                if (x & 3) == 0 && (z & 3) == 0 {
+                    let four = fresh.grid(x, z, 4, 1).pop().unwrap_or_default();
+                    entry[3] += 16 * u32::from(four.spans.last().is_some_and(|s| is_tree(s.state)));
+                }
+                if i == 0 {
+                    // The chunk as one 16-block cell: real chunk reduced, and the estimate.
+                    let reduced = Column::reduced(columns, 0, 0, 16);
+                    entry[4] += 256 * u32::from(reduced.spans.last().is_some_and(|s| is_tree(s.state)));
+                    let wide = fresh.grid(x, z, 16, 1).pop().unwrap_or_default();
+                    entry[5] += 256 * u32::from(wide.spans.last().is_some_and(|s| is_tree(s.state)));
+                }
+            }
+        }
+        let mut total = [0u32; 6];
+        for (biome, n) in &by_biome {
+            if n[0] < 256 {
+                continue;
+            }
+            let pct = |v: u32| v as f64 * 100.0 / n[0] as f64;
+            println!(
+                "{biome}: {} columns, real trees {:.0}%, far (1) {:.0}%, far (4) {:.0}%, 16-cells real {:.0}% far {:.0}%",
+                n[0], pct(n[1]), pct(n[2]), pct(n[3]), pct(n[4]), pct(n[5])
+            );
+            for k in 0..6 {
+                total[k] += n[k];
+            }
+        }
+        let pct = |v: u32| v as f64 * 100.0 / total[0].max(1) as f64;
+        println!(
+            "all: real trees {:.0}%, far (1) {:.0}%, far (4) {:.0}%, 16-cells real {:.0}% far {:.0}%",
+            pct(total[1]), pct(total[2]), pct(total[3]), pct(total[4]), pct(total[5])
+        );
+        // Forest cells drawn as trees about as often as real forest chunks reduce to trees
+        // (they were 73% to 37%: far forests one solid sheet).
+        let forest = by_biome.get("minecraft:forest").expect("the sampled areas hold forest");
+        let (real16, far16) = (forest[4] as f64 / forest[0] as f64, forest[5] as f64 / forest[0] as f64);
+        assert!(
+            (far16 - real16).abs() <= 0.15,
+            "16-wide forest cells: real {real16:.2}, far {far16:.2}"
+        );
+        Ok(())
+    }
+
     #[test]
     #[ignore = "requires prepared worldgen data in HORIZON_TEST_RESOURCES"]
     fn end_small_islands_are_estimated_over_the_void() -> crate::Result<()> {
