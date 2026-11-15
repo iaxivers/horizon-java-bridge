@@ -62,6 +62,17 @@ public final class HorizonConfiguration {
                 if (SET_UP.add(connection)) {
                     HorizonHooks.initFields(connection);
                     HorizonHooks.constructed(connection);
+                    // A closed memory channel, as the client's connection has (HorizonClient.memoryConnection):
+                    // mods reach the connection's channel while configuring (Multiloader Data Extensions'
+                    // data-map reply: connection.channel.pipeline()), and a null one failed their task.
+                    // (UMP, 2026-11-14)
+                    try {
+                        Field ch = net.minecraft.network.Connection.class.getDeclaredField("channel");
+                        ch.setAccessible(true);
+                        if (ch.get(connection) == null) HorizonClient.memoryConnection(connection);
+                    } catch (ReflectiveOperationException e) {
+                        Natives.log("Java mods: a joining player's connection has no channel: " + e);
+                    }
                 }
             }
             var listener = new ServerConfigurationPacketListenerImpl(server, connection,

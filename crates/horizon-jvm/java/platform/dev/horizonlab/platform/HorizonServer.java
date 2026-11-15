@@ -257,7 +257,14 @@ public final class HorizonServer {
 
     /** The headless client's network connection (its packet listener's): a mirror one. */
     static synchronized net.minecraft.network.Connection clientConnection() {
-        if (clientConnection == null) clientConnection = HorizonClient.memoryConnection(allocate(net.minecraft.network.Connection.class));
+        if (clientConnection == null) {
+            var connection = allocate(net.minecraft.network.Connection.class);
+            // Made without its constructor: the mods' fields on it (Fabric's packet context, which
+            // Female Gender asks for its version as the client joins) are made as at its end.
+            // (UMP, 2026-11-14)
+            HorizonHooks.initFields(connection);
+            clientConnection = HorizonClient.memoryConnection(connection);
+        }
         return clientConnection;
     }
 
