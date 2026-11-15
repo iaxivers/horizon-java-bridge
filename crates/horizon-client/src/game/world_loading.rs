@@ -465,6 +465,20 @@ pub(super) fn preload_launch_world(
             ) {
                 let preset = horizon_client::save::WorldGen::preset(&world_root);
                 let _ = data.prepare_decoration(preset, "minecraft:overworld");
+                // The Nether's and the End's too, on threads of their own: a data pack's
+                // function run in another dimension (`execute in`) opens that level on the
+                // server thread, which built its decoration there (~2-3 s of a 184-mod join,
+                // UMP join samples: enter_command_level -> make_streaming ->
+                // Decoration::new_with). (UMP, 2026-11-14)
+                for dimension in ["minecraft:the_nether", "minecraft:the_end"] {
+                    let data = data.clone();
+                    let preset = preset.to_owned();
+                    let _ = std::thread::Builder::new()
+                        .name("World data preload".into())
+                        .spawn(move || {
+                            let _ = data.prepare_decoration(&preset, dimension);
+                        });
+                }
             }
             // As in `preload_world_data`: the loot data and the server's
             // data share one read of the recipe folder.
