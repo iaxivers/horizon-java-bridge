@@ -34,9 +34,14 @@ public abstract class ShapesJoinMixin {
     }
 
     @Inject(method = "join(Lnet/minecraft/world/phys/shapes/VoxelShape;Lnet/minecraft/world/phys/shapes/VoxelShape;Lnet/minecraft/world/phys/shapes/BooleanOp;)Lnet/minecraft/world/phys/shapes/VoxelShape;",
-            at = @At("RETURN"))
+            at = @At("RETURN"), cancellable = true)
     private static void horizon$rememberJoin(VoxelShape first, VoxelShape second, BooleanOp op, CallbackInfoReturnable<VoxelShape> info) {
-        HorizonShapeMemo.putJoin(first, second, op, info.getReturnValue());
+        // The shape made before with the same boxes, if any: shapes joined from new parts each time
+        // (wall and fence shapes, Yuushya's collision files) are then one instance, which the
+        // identity memos above answer for next time.
+        VoxelShape shape = HorizonShapeMemo.canonical(info.getReturnValue());
+        if (shape != info.getReturnValue()) info.setReturnValue(shape);
+        HorizonShapeMemo.putJoin(first, second, op, shape);
     }
 
     /**

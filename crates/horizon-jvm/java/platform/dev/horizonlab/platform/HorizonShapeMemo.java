@@ -23,6 +23,26 @@ public final class HorizonShapeMemo {
     private record Box(double x0, double y0, double z0, double x1, double y1, double z1) {}
     private static final ConcurrentHashMap<Box, VoxelShape> BOXES = new ConcurrentHashMap<>();
     private static final LongAdder BOX_HITS = new LongAdder();
+    /** Joined shapes by their boxes (min x, y, z, max x, y, z each, in order): one instance per geometry. */
+    private static final ConcurrentHashMap<ShapeKey, VoxelShape> CANONICAL = new ConcurrentHashMap<>();
+    private static final LongAdder CANONICAL_HITS = new LongAdder();
+
+    private record ShapeKey(double[] boxes, int hash) {
+        static ShapeKey of(VoxelShape shape) {
+            java.util.List<net.minecraft.world.phys.AABB> list = shape.toAabbs();
+            double[] boxes = new double[list.size() * 6];
+            int i = 0;
+            for (net.minecraft.world.phys.AABB b : list) {
+                boxes[i++] = b.minX; boxes[i++] = b.minY; boxes[i++] = b.minZ;
+                boxes[i++] = b.maxX; boxes[i++] = b.maxY; boxes[i++] = b.maxZ;
+            }
+            return new ShapeKey(boxes, java.util.Arrays.hashCode(boxes));
+        }
+        @Override public boolean equals(Object o) {
+            return o instanceof ShapeKey k && k.hash == hash && java.util.Arrays.equals(k.boxes, boxes);
+        }
+        @Override public int hashCode() { return hash; }
+    }
     private static final LongAdder JOIN_HITS = new LongAdder();
     private static final LongAdder JOIN_MISSES = new LongAdder();
     private static final LongAdder HITS = new LongAdder();
@@ -81,6 +101,18 @@ public final class HorizonShapeMemo {
         BOXES.putIfAbsent(new Box(x0, y0, z0, x1, y1, z1), value);
     }
 
+    /** The instance made before with the same boxes as `shape` (an optimized join's), else `shape` itself. */
+    public static VoxelShape canonical(VoxelShape shape) {
+        if (!ON || shape == null || shape.isEmpty()) return shape;
+        ShapeKey key = ShapeKey.of(shape);
+        if (key.boxes.length > 6 * 64) return shape;
+        if (CANONICAL.size() >= MAX / 8) CANONICAL.clear();
+        VoxelShape known = CANONICAL.putIfAbsent(key, shape);
+        if (known == null) return shape;
+        CANONICAL_HITS.increment();
+        return known;
+    }
+
     /** One line: how often the memory answered (called after the mods' entrypoints). */
     public static void report() {
         long hits = HITS.sum(), misses = MISSES.sum();
@@ -88,7 +120,8 @@ public final class HorizonShapeMemo {
             Natives.log("Java mods: shape joins remembered " + hits + " of " + (hits + misses)
                     + " times; " + MEMO.size() + " kept; joined shapes " + JOIN_HITS.sum() + " of "
                     + (JOIN_HITS.sum() + JOIN_MISSES.sum()) + "; " + JOINS.size() + " kept; boxes shared " + BOX_HITS.sum()
-                    + " times, " + BOXES.size() + " kept");
+                    + " times, " + BOXES.size() + " kept; equal joined shapes shared " + CANONICAL_HITS.sum()
+                    + " times, " + CANONICAL.size() + " kept");
         }
     }
 }
