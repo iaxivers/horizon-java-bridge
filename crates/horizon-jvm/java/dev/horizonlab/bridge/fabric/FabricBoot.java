@@ -67,6 +67,8 @@ public final class FabricBoot {
         }
         HorizonGameProvider.parentClassPath = parent;
 
+        // Knot's class lookups through a package index (HorizonKnotIndex), before it makes its loader.
+        HorizonKnotIndex.install();
         Knot knot = new Knot(env);
         gameLoader = knot.init(new String[0]);
         // Mods' log lines into Horizon's log from here on (the platform's HorizonLog).
