@@ -7948,7 +7948,8 @@ impl Game<'_> {
         self.tick_command_extras();
         self.native_tick();
         self.tell_native_now();
-        self.tick_java_server();
+        // Its own span in the slow-tick line (HORIZON_SPIKES), with the Java mods' share.
+        horizon_client::spans::time("tick_java", || self.tick_java_server());
         self.tick_world(running)
     }
     /// What the tick runs after the local player's own update: effects, the
