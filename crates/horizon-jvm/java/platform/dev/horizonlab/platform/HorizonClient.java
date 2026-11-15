@@ -518,25 +518,25 @@ public final class HorizonClient {
     }
 
     /** Fields set by name, looked up once (entities' snapshots set some for each entity). */
-    private static final java.util.Map<Class<?>, java.util.Map<String, Field>> FIELDS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.Map<Class<?>, java.util.Map<String, Field>> FIELD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
     static void set(Class<?> owner, Object target, String name, Object value) throws ReflectiveOperationException {
-        Field field = FIELDS.computeIfAbsent(owner, o -> new java.util.concurrent.ConcurrentHashMap<>()).get(name);
+        Field field = FIELD_CACHE.computeIfAbsent(owner, o -> new java.util.concurrent.ConcurrentHashMap<>()).get(name);
         if (field == null) {
             field = owner.getDeclaredField(name);
             field.setAccessible(true);
-            FIELDS.get(owner).put(name, field);
+            FIELD_CACHE.get(owner).put(name, field);
         }
         field.set(target, value);
     }
 
     /** A field read by name (looked up once, as {@link #set}). */
     static Object get(Class<?> owner, Object target, String name) throws ReflectiveOperationException {
-        Field field = FIELDS.computeIfAbsent(owner, o -> new java.util.concurrent.ConcurrentHashMap<>()).get(name);
+        Field field = FIELD_CACHE.computeIfAbsent(owner, o -> new java.util.concurrent.ConcurrentHashMap<>()).get(name);
         if (field == null) {
             field = owner.getDeclaredField(name);
             field.setAccessible(true);
-            FIELDS.get(owner).put(name, field);
+            FIELD_CACHE.get(owner).put(name, field);
         }
         return field.get(target);
     }
@@ -3549,6 +3549,31 @@ public final class HorizonClient {
     private static final java.util.Set<String> HEALTH_PARTS = java.util.Set.of(
             "extractPlayerHealth", "extractHearts", "extractHeart", "extractFood", "extractArmor", "extractAirBubbles");
 
+    /**
+     * Hud's methods named {@code name} that draw a part (GuiGraphicsExtractor, maybe DeltaTracker),
+     * accessible, found once: the HUD is drawn every tick for every player, and looking them up by
+     * reflection each time cost several ms a tick with a big pack (UMP profile). (UMP, 2026-11-11)
+     */
+    private static final java.util.Map<String, java.util.List<java.lang.reflect.Method>> HUD_PARTS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static java.util.List<java.lang.reflect.Method> hudParts(String name) {
+        return HUD_PARTS.computeIfAbsent(name, n -> {
+            java.util.List<java.lang.reflect.Method> out = new java.util.ArrayList<>();
+            for (var m : net.minecraft.client.gui.Hud.class.getDeclaredMethods()) {
+                if (!m.getName().equals(n) || m.isSynthetic()) continue;
+                Class<?>[] params = m.getParameterTypes();
+                boolean one = params.length == 1 && params[0] == net.minecraft.client.gui.GuiGraphicsExtractor.class;
+                boolean two = params.length == 2 && params[0] == net.minecraft.client.gui.GuiGraphicsExtractor.class
+                        && params[1] == net.minecraft.client.DeltaTracker.class;
+                if (!one && !two) continue;
+                m.setAccessible(true);
+                out.add(m);
+            }
+            return out;
+        });
+    }
+
     /** The player's HUD as their client's mods draw it, to them when it changed. */
     private static void sendHud(net.minecraft.server.level.ServerPlayer player) {
         String frame = hud(player).toString();
@@ -3595,17 +3620,9 @@ public final class HorizonClient {
         for (String method : hooked) {
             if (HEALTH_PARTS.contains(method) || method.equals("extractRenderState")) continue;
             hudPart(method, () -> {
-                for (var m : net.minecraft.client.gui.Hud.class.getDeclaredMethods()) {
-                    if (!m.getName().equals(method) || m.isSynthetic()) continue;
-                    Class<?>[] params = m.getParameterTypes();
-                    if (params.length == 1 && params[0] == net.minecraft.client.gui.GuiGraphicsExtractor.class) {
-                        m.setAccessible(true);
-                        m.invoke(hud, graphics);
-                    } else if (params.length == 2 && params[0] == net.minecraft.client.gui.GuiGraphicsExtractor.class
-                            && params[1] == net.minecraft.client.DeltaTracker.class) {
-                        m.setAccessible(true);
-                        m.invoke(hud, graphics, delta);
-                    }
+                for (var m : hudParts(method)) {
+                    if (m.getParameterCount() == 1) m.invoke(hud, graphics);
+                    else m.invoke(hud, graphics, delta);
                 }
             });
         }
@@ -3630,14 +3647,20 @@ public final class HorizonClient {
         return graphics.ops();
     }
 
+    /** Methods looked up once by class, name and argument count (call() runs every tick). */
+    private static final java.util.Map<String, java.util.Optional<java.lang.reflect.Method>> CALLS = new java.util.concurrent.ConcurrentHashMap<>();
+
     private static void call(Object target, String name, Object... args) throws Throwable {
-        for (var m : target.getClass().getDeclaredMethods()) {
-            if (m.getName().equals(name) && m.getParameterCount() == args.length) {
-                m.setAccessible(true);
-                m.invoke(target, args);
-                return;
+        var m = CALLS.computeIfAbsent(target.getClass().getName() + "#" + name + "/" + args.length, k -> {
+            for (var c : target.getClass().getDeclaredMethods()) {
+                if (c.getName().equals(name) && c.getParameterCount() == args.length) {
+                    c.setAccessible(true);
+                    return java.util.Optional.of(c);
+                }
             }
-        }
+            return java.util.Optional.empty();
+        });
+        if (m.isPresent()) m.get().invoke(target, args);
     }
 
     /** One part of the HUD; one failing (each frame) is told a few times and the rest still draw. */
@@ -3825,9 +3848,16 @@ public final class HorizonClient {
         });
     }
 
+    /** Fields looked up once (field() runs every tick: the HUD, the camera, each player). */
+    private static final java.util.Map<Class<?>, java.util.Map<String, Field>> FIELDS = new java.util.concurrent.ConcurrentHashMap<>();
+
     static Object field(Class<?> owner, Object target, String name) throws ReflectiveOperationException {
-        Field field = owner.getDeclaredField(name);
-        field.setAccessible(true);
+        Field field = FIELD_CACHE.computeIfAbsent(owner, o -> new java.util.concurrent.ConcurrentHashMap<>()).get(name);
+        if (field == null) {
+            field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            FIELD_CACHE.get(owner).put(name, field);
+        }
         return field.get(target);
     }
 
