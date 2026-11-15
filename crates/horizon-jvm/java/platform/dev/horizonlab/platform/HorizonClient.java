@@ -59,6 +59,16 @@ public final class HorizonClient {
 
     /** Minecraft's constructor at its options, after the registries' freeze (FabricBoot). */
     public static void optionsStart() {
+        // Minecraft's constructor makes its block colours before its options and the end of its
+        // start, where mods register tints (WorldWeaver's applyBlockTints: BetterEnd, BetterNether
+        // got null). The models' load later keeps this one and its registrations. (UMP, 2026-11-11)
+        try {
+            if (minecraft.getBlockColors() == null) {
+                set(Minecraft.class, minecraft, "blockColors", net.minecraft.client.color.block.BlockColors.createDefault());
+            }
+        } catch (Throwable t) {
+            Natives.log("Horizon's client: no block colours at its start: " + t);
+        }
         HorizonHooks.fireClient(minecraft, HorizonHooks.START_OPTIONS);
         HorizonHooks.fireClient(minecraft, HorizonHooks.START_END);
     }
@@ -1966,7 +1976,9 @@ public final class HorizonClient {
             Natives.log("Horizon's client: the client's bootstrap stopped at " + t);
         }
         try {
-            var colors = net.minecraft.client.color.block.BlockColors.createDefault();
+            // The start's block colours (with the tints mods registered there), else new ones.
+            var colors = minecraft.getBlockColors() != null ? minecraft.getBlockColors()
+                    : net.minecraft.client.color.block.BlockColors.createDefault();
             set(Minecraft.class, minecraft, "blockColors", colors);
             var atlases = new net.minecraft.client.resources.model.sprite.AtlasManager(minecraft.getTextureManager(), 0);
             var skins = (net.minecraft.client.renderer.PlayerSkinRenderCache) Natives.allocate(net.minecraft.client.renderer.PlayerSkinRenderCache.class);
