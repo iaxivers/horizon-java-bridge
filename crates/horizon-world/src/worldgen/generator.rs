@@ -2404,6 +2404,9 @@ pub(super) struct WorkerState {
     heights: HashMap<(i32, i32, u8), i32>,
     /// Decorate with structure pieces only (for structure parity checks).
     pub(super) structures_only: bool,
+    /// Skip the steps whose features can't be seen from the surface: ores, underground
+    /// decoration, fluid springs, strongholds (far terrain's speculative decoration).
+    pub(super) surface_only: bool,
     pub(super) structure_mobs: Option<Arc<dyn StructureMobs>>,
     /// The world's surface rule compiled once for this worker's chunks: a
     /// `CompiledSurfaceRule` of the pipeline's random.
@@ -3689,6 +3692,7 @@ impl OverworldGenerator {
                 structure_biomes: HashMap::new(),
                 timings: StageTimings::default(),
                 structures_only: false,
+                surface_only: false,
                 structure_mobs: None,
                 heights: HashMap::new(),
                 surface_rule: None,
@@ -3853,6 +3857,13 @@ impl GeneratorWorker {
     /// (for structure placement parity checks).
     pub fn set_structures_only(&mut self, only: bool) {
         self.state.structures_only = only;
+    }
+    /// Decorate for the look of the surface only: the steps under it (ores, underground
+    /// decoration, fluid springs, strongholds) are skipped. Far terrain's speculative chunks
+    /// (never saved, never played in) take only what is seen from afar: trees, lakes, snow,
+    /// surface structures. (UMP, 2026-11-13)
+    pub fn set_surface_only(&mut self, only: bool) {
+        self.state.surface_only = only;
     }
     pub fn set_structure_mobs(&mut self, mobs: Arc<dyn StructureMobs>) {
         self.state.structure_mobs = Some(mobs);

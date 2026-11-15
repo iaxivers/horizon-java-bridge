@@ -118,6 +118,9 @@ impl Builder {
                     }
                 };
                 let mut state = generator.worker();
+                // Only what shows from afar: no ores, underground decoration or springs.
+                // HORIZON_FAR_DECORATION_FULL=1 keeps every step (A/B checks).
+                state.set_surface_only(std::env::var("HORIZON_FAR_DECORATION_FULL").as_deref() != Ok("1"));
                 loop {
                     let key = {
                         let mut requests = worker.requests.lock().unwrap();
