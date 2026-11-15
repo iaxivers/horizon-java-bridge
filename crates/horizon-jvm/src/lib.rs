@@ -388,12 +388,14 @@ pub fn start(config: &Config) -> Result<&'static Bridge, String> {
     }
     class_path.extend(config.class_path.iter().cloned());
     let log_config = write_jar(&config.work, "log4j2-horizon.xml", LOG4J_CONFIG.as_bytes())?;
+    // Where Java may keep files between runs (the converted structure templates of mods).
+    let work_property = format!("-Dhorizon.work={}", option_path(&config.work)?.display());
     let vm = create_vm(
         &config.home,
         &class_path,
         config.class_archive.as_deref(),
         &log_config,
-        &[],
+        &[work_property],
     )?;
     let mut env = vm
         .attach_current_thread_permanently()

@@ -5,6 +5,7 @@
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "EntityAccess",
+    "TemplateCacheMixin",
     "ServerCommonListenerAccess",
     "PlayerListAccess",
     "MinecraftServerAccess",
