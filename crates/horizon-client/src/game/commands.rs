@@ -2044,7 +2044,8 @@ impl Game<'_> {
     fn cmd_time(&mut self, id: &str, ctx: &Context) -> R<i32> {
         if id == "time.query.gametime" {
             let t = self.world.game_time;
-            self.system_message(Text::tr("commands.time.query.gametime", &[&t]));
+            // sendSuccess(.., false): quiet in functions and `execute store` (UMP: Incendium's clock functions filled the chat)
+            self.feedback_unbroadcast(Text::tr("commands.time.query.gametime", &[&t]));
             return Ok((t % i64::from(i32::MAX)) as i32);
         }
         // `time of <clock>` names the clock; otherwise the dimension's default clock.
@@ -2161,7 +2162,7 @@ impl Game<'_> {
                 Ok(1)
             }
             "time.query.time" => {
-                self.system_message(Text::tr("commands.time.query.absolute", &[&clock, &total]));
+                self.feedback_unbroadcast(Text::tr("commands.time.query.absolute", &[&clock, &total]));
                 Ok((total % i64::from(i32::MAX)) as i32)
             }
             "time.query.timeline" | "time.query.repetition" => {
@@ -3295,7 +3296,7 @@ impl Game<'_> {
             Some(Arg::Bool(b)) => Value::Bool(*b),
             Some(Arg::Int(i)) => Value::Int(*i),
             _ => {
-                self.system_message(Text::tr("commands.gamerule.query", &[&rule.name, &current]));
+                self.feedback_unbroadcast(Text::tr("commands.gamerule.query", &[&rule.name, &current]));
                 return Ok(match current {
                     Value::Bool(b) => i32::from(b),
                     Value::Int(i) => i,
