@@ -384,6 +384,24 @@ fn failures_in(log: &str) -> Vec<Failure> {
                 name: Some(name.trim().to_string()),
                 text: rest.trim().to_string(),
             }
+        } else if let Some(rest) = message
+            .strip_prefix("Java mods: ")
+            .filter(|r| r.contains(" isn't needed in Horizon"))
+        {
+            // Left out on purpose (a renderer or performance mod: Horizon is the engine): said, not an error.
+            Failure {
+                name: rest.split(" isn't needed in Horizon").next().map(|n| n.trim().to_string()),
+                text: rest.trim().to_string(),
+            }
+        } else if let Some(rest) = message
+            .strip_prefix("Java mods: ")
+            .filter(|r| r.contains(" can't be read (left out)"))
+        {
+            // One mod's broken recipe or advancement (data made for another mod's version): left out.
+            Failure {
+                name: rest.split("'s ").next().map(|n| n.trim().to_string()),
+                text: rest.split(": ").next().unwrap_or(rest).trim().to_string(),
+            }
         } else if message.starts_with("Java mods: not started")
             || message.starts_with("Java mods: Fabric can't start")
             || message.contains("Incompatible mods found")
@@ -422,6 +440,18 @@ fn report_line(line: &str) -> Option<Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn left_out_mods_and_broken_data_are_reported_plainly() {
+        let log = "[01:00:00] [Render thread/INFO]: Java mods: Lithium isn't needed in Horizon: Horizon's own engine is already fast (left out)\n\
+                   [01:00:01] [Render thread/INFO]: Java mods: justenoughbreeding's recipe justenoughbreeding:breeding/x can't be read (left out): Failed to parse\n";
+        let f = failures_in(log);
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].name.as_deref(), Some("Lithium"));
+        assert!(f[0].text.contains("isn't needed in Horizon"));
+        assert_eq!(f[1].name.as_deref(), Some("justenoughbreeding"));
+        assert!(f[1].text.ends_with("can't be read (left out)"));
+    }
 
     fn jar(path: &Path, meta: Option<&str>) {
         let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
