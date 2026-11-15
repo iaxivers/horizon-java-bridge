@@ -1190,7 +1190,12 @@ public final class HorizonEntityRender {
             var c = collector(out);
             try {
                 HorizonClient.as(p, () -> {
-                    submitArm.invoke(hands, level, fp, PARTIAL_TICK, a.getXRot(), hand, 0.0F, stack, 0.0F,
+                    // The arm's swing as the player swings it (LivingEntity.getAttackAnim on the
+                    // swinging hand), not 0: a hand a mod draws (Carry On's carry, a gun, a held
+                    // model) stood frozen while vanilla's own swung. (UMP, 2026-11-14)
+                    var current = p.isSwinging() ? p.getCurrentSwing() : null;
+                    float swing = current != null && current.hand() == hand ? p.getSwingAnimation(PARTIAL_TICK) : 0.0F;
+                    submitArm.invoke(hands, level, fp, PARTIAL_TICK, a.getXRot(), hand, swing, stack, 0.0F,
                             new PoseStack(), c, 0xF000F0);
                     flush(c);
                 });

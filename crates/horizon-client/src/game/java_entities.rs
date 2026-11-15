@@ -116,6 +116,12 @@ struct Shown {
     /// A mod's block entity its renderer draws (a cutting board's item), at its block's
     /// corner: no box to hit, drawn as block entities are (their range, the light above).
     block: bool,
+    /// Ticks since its look was new (0: this tick's), and the ticks between the look before it
+    /// and this one: the bridge draws a still or far entity every 2nd or 4th tick, and its pose
+    /// moves over that whole gap, not in one tick and then held (stepped animations, user
+    /// 2026-11-14).
+    age: u32,
+    span: u32,
 }
 
 /// The Java entities this game was last told of, and the tick before (to move between them).
@@ -123,7 +129,10 @@ struct Shown {
 pub(super) struct JavaEntities {
     trees: HashMap<String, Arc<Part>>,
     now: Vec<Shown>,
+    /// Each entity's look before its current one (the pose it moves from).
     before: HashMap<i32, Shown>,
+    /// Each entity's place the tick before (it moves every tick, its look may not).
+    last_position: HashMap<i32, [f64; 3]>,
     own: Vec<Shown>,
     pub(super) hands: Option<Hands>,
     pub(super) ride: Option<Ride>,
@@ -346,6 +355,8 @@ impl RawShown {
             name_y: self.tag_y,
             shadow: self.shadow,
             block: self.block,
+            age: 0,
+            span: 1,
         }
     }
 }
@@ -410,16 +421,25 @@ impl JavaEntities {
             self.trees.insert(key, Arc::new(Part::parse("root", &tree)));
         }
         let last: HashMap<i32, &Shown> = self.now.iter().map(|s| (s.id, s)).collect();
+        let mut new_before: Vec<(i32, Shown)> = Vec::new();
         let now: Vec<Shown> = payload
             .entities
             .into_iter()
             .filter_map(|raw| {
+                let id = raw.id as i32;
                 if !raw.keep {
-                    return Some(raw.shown());
+                    let mut shown = raw.shown();
+                    // A new look: it moves from the last one over the ticks since that was new.
+                    if let Some(prev) = last.get(&id) {
+                        shown.span = (prev.age + 1).clamp(1, 8);
+                        new_before.push((id, (*prev).clone()));
+                    }
+                    return Some(shown);
                 }
                 // A resting entity: its last look, where it is now (none yet: not drawn).
-                let mut kept = (*last.get(&(raw.id as i32))?).clone();
+                let mut kept = (*last.get(&id)?).clone();
                 kept.position = [raw.x, raw.y, raw.z];
+                kept.age = kept.age.saturating_add(1);
                 Some(kept)
             })
             .collect();
@@ -447,19 +467,23 @@ impl JavaEntities {
                 hide: h.hide,
             }
         });
-        self.before = std::mem::replace(&mut self.now, now)
-            .into_iter()
-            .map(|s| (s.id, s))
-            .collect();
+        // Where each was last tick; the looks before stay until a new look replaces them.
+        self.last_position = self.now.iter().map(|s| (s.id, s.position)).collect();
+        let alive: std::collections::HashSet<i32> = now.iter().map(|s| s.id).collect();
+        self.before.retain(|id, _| alive.contains(id));
+        for (id, prev) in new_before {
+            self.before.insert(id, prev);
+        }
+        self.now = now;
         whole
     }
 
     /// Where an entity is `alpha` of the way from the last tick to this one.
     fn position(&self, s: &Shown, alpha: f64) -> [f64; 3] {
-        let Some(b) = self.before.get(&s.id) else {
+        let Some(b) = self.last_position.get(&s.id) else {
             return s.position;
         };
-        std::array::from_fn(|i| b.position[i] + (s.position[i] - b.position[i]) * alpha)
+        std::array::from_fn(|i| b[i] + (s.position[i] - b[i]) * alpha)
     }
 
     fn bounds(&self, s: &Shown, alpha: f64) -> Aabb {
@@ -674,8 +698,10 @@ impl Game<'_> {
             let packed = (u32::from(light >> 4) * 16) | ((u32::from(light & 15) * 16) << 8);
             let before = java.before.get(&s.id);
             let base = glam::Mat4::from_translation(d.as_vec3());
+            // Its pose this far from the look before to this one, over the ticks between them.
+            let pose_t = ((s.age as f32 + t) / s.span.max(1) as f32).min(1.0);
             self.draw_look(
-                s.id, &s.models, &s.meshes, &s.items, before, base, packed, t, out,
+                s.id, &s.models, &s.meshes, &s.items, before, base, packed, pose_t, out,
             );
         }
         // What mods draw on this game's own player, seen from outside (third person): at the
@@ -811,12 +837,27 @@ impl Game<'_> {
         }
         // Custom geometry (GeckoLib's): its quads as written, moved with the entity
         // between ticks.
-        for m in meshes {
+        for (i, m) in meshes.iter().enumerate() {
             let Some(r) = self.java_sprite(&m.sprite) else {
                 continue;
             };
             let overlay = overlay_code(m.overlay);
-            for (v, &argb) in m.vertices.iter().zip(&m.colors) {
+            // The same mesh the look before (a GeckoLib model's bones, vertex for vertex): its
+            // vertices move between the two, as a vanilla model's parts do, instead of jumping
+            // once a tick.
+            let from = before
+                .and_then(|b| b.meshes.get(i))
+                .filter(|b| b.sprite == m.sprite && b.vertices.len() == m.vertices.len());
+            for (k, (v, &argb)) in m.vertices.iter().zip(&m.colors).enumerate() {
+                let v = match from {
+                    Some(b) => {
+                        let f = &b.vertices[k];
+                        std::array::from_fn::<f32, 8, _>(|c| {
+                            if (3..5).contains(&c) { v[c] } else { lerp(f[c], v[c], t) }
+                        })
+                    }
+                    None => *v,
+                };
                 let n = [v[5], v[6], v[7]].map(|c| (c.clamp(-1.0, 1.0) * 127.0) as i8);
                 out.push(Vertex {
                     pos: base
