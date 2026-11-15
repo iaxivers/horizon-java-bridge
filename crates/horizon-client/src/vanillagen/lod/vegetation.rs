@@ -349,15 +349,20 @@ impl Vegetation {
                 - (-total * f64::from(tree.radius * tree.radius) * std::f64::consts::PI / 256.)
                     .exp();
             if coverage >= 0.25 {
+                // A wide cell is one block-textured box: its crown as high as a full tree drew
+                // 16x16 slabs of leaves over every wooded cell, the square boxes of far forests
+                // (user, 2026-11-14). The box is as high as the cell's trees are on average: full
+                // crown height where they close the canopy, lower as they thin out, so a forest
+                // reads as rolling treetops and a sparse one as ground with low cover.
                 let height = tree.height + ((n >> 32) & 1) as i32;
-                // The cell's representative tree stands in it: its trunk
-                // is drawn under the crown.
-                best = Some((
-                    surface.height + height.max(4),
-                    surface.height + height.max(4) - tree.radius * 2,
-                    *tree,
-                    true,
-                ));
+                let full = surface.height + height.max(4);
+                let ground = surface.height + 1;
+                let top = ground + ((full - ground) as f64 * coverage.min(1.0)).round() as i32;
+                // Varied a block or two between cells, as treetops are.
+                let top = top - ((n >> 40) % 3) as i32 + 1;
+                if top > ground {
+                    best = Some((top, (top - tree.radius * 2).max(ground), *tree, true));
+                }
             }
         } else {
             let radius = trees.iter().map(|t| t.radius).max().unwrap_or(2);

@@ -320,6 +320,12 @@ impl Column {
         if width == 1 {
             return columns[z * 16 + x].clone();
         }
+        // A height is drawn where at least a quarter of the footprint holds a block there
+        // (cells of 2 or less: any one column): with "any column", one tree made a 16x16 box
+        // of leaves and one high column raised the whole cell, far terrain's square boxes and
+        // blocky hills (user, 2026-11-14). Under what is drawn, a gap takes what any column
+        // holds there (trunks stay under their crowns, nothing hangs in the air).
+        // The footprint's span edges, sorted once for both sweeps.
         let mut events = Vec::new();
         for dz in z..z + width {
             for dx in x..x + width {
@@ -331,15 +337,41 @@ impl Column {
             }
         }
         events.sort_unstable_by_key(|event| event.0);
+        let any = Self::sweep(&events, 1);
+        if width <= 2 {
+            return any;
+        }
+        let most = Self::sweep(&events, (width * width / 4) as i32);
+        let mut out = Self::default();
+        for span in most.spans.iter() {
+            let from = out.spans.last().map(|s| s.max);
+            if let Some(from) = from
+                && from < span.min
+            {
+                for fill in any.spans.iter() {
+                    let (min, max) = (fill.min.max(from), fill.max.min(span.min));
+                    if min < max {
+                        out.push(Span { min, max, ..*fill });
+                    }
+                }
+            }
+            out.push(*span);
+        }
+        out.surface = most.surface;
+        out
+    }
+    /// The spans a footprint's sorted span edges give where at least `needed` of its columns
+    /// hold a block, in the material most of them hold there.
+    fn sweep(events: &[(i16, (BlockStateId, u16, u16), i32)], needed: i32) -> Self {
         let mut result = Self::default();
         let mut votes = Vec::<((BlockStateId, u16), i32)>::new();
         let mut sky = [0i32; 16];
         let mut block = [0i32; 16];
         let mut occupied = 0;
         let mut bottom = MIN_Y as i16;
-        for (y, material, change) in events {
+        for &(y, material, change) in events {
             if bottom < y {
-                if occupied > 0
+                if occupied >= needed
                     && let Some(&((state, biome), _)) =
                         votes.iter().max_by_key(|&(material, count)| {
                             (*count, std::cmp::Reverse((material.0.0, material.1)))
@@ -3797,10 +3829,28 @@ mod tests {
             [span(0, 4, 1), span(4, 12, 2), span(12, 14, 3)]
         );
         assert_eq!(reduced.get(4, 8, 4).spans, [span(0, 4, 1)]);
+        // One tree in a corner of a 16-wide cell (16 of its 256 columns) is not the cell's: it
+        // made a 16x16 box of leaves from afar (user, 2026-11-14).
         assert_eq!(
             reduced.get(0, 0, 16).spans,
+            [span(0, 4, 1)],
+            "one small crown does not cover a whole wide cell"
+        );
+        // A crown over a quarter of the cell or more is drawn, on its trunk.
+        let mut columns = std::array::from_fn(|_| Column {
+            surface: None,
+            spans: vec![span(0, 4, 1)].into(),
+        });
+        columns[0].spans.push(span(4, 12, 2));
+        for z in 0..8 {
+            for x in 0..8 {
+                columns[z * 16 + x].spans.push(span(12, 14, 3));
+            }
+        }
+        assert_eq!(
+            Column::reduced(&columns, 0, 0, 16).spans,
             [span(0, 4, 1), span(4, 12, 2), span(12, 14, 3)],
-            "a crown over one corner of a wide cell still sits on its trunk"
+            "a crown over a quarter of a wide cell still sits on its trunk"
         );
     }
     /// A chunk is reduced to the one cell width that reads it, when it does.
