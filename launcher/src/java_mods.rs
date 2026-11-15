@@ -167,6 +167,31 @@ pub fn runs_on(wants: &serde_json::Value, version: &str) -> Option<bool> {
     }
 }
 
+/// Two pre-release parts as SemVer (and Fabric's SemanticVersionImpl) compare them: part by
+/// part on the dots, numbers as numbers (`6.0.10` after `6.0.9`: JourneyMap `26.3-6.0.10` meets
+/// MapFrontiers' `>=26.3-6.0.9`), a number before a word, words as text, fewer parts first.
+fn pre_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let (mut x, mut y) = (a.split('.'), b.split('.'));
+    loop {
+        match (x.next(), y.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(p), Some(q)) => {
+                let o = match (p.parse::<u64>(), q.parse::<u64>()) {
+                    (Ok(m), Ok(n)) => m.cmp(&n),
+                    (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                    (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                    (Err(_), Err(_)) => p.cmp(q),
+                };
+                if o.is_ne() {
+                    return o;
+                }
+            }
+        }
+    }
+}
+
 /// A version as Fabric compares them: numbers, then a pre-release (`-rc.1`) before the release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Version {
@@ -198,7 +223,7 @@ impl Version {
                 (None, None) => std::cmp::Ordering::Equal,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (Some(_), None) => std::cmp::Ordering::Less,
-                (Some(a), Some(b)) => a.cmp(b),
+                (Some(a), Some(b)) => pre_cmp(a, b),
             })
     }
 
@@ -562,6 +587,16 @@ More details:
 
     fn on_26_3(wants: serde_json::Value) -> Option<bool> {
         runs_on(&wants, "26.3")
+    }
+
+    #[test]
+    fn compares_pre_release_parts_as_numbers() {
+        let wants = serde_json::json!(">=26.3-6.0.9");
+        assert_eq!(runs_on(&wants, "26.3-6.0.10"), Some(true));
+        assert_eq!(runs_on(&wants, "26.3-6.0.9"), Some(true));
+        assert_eq!(runs_on(&wants, "26.3-6.0.8"), Some(false));
+        assert_eq!(runs_on(&serde_json::json!(">=1.0-rc.2"), "1.0-rc.10"), Some(true));
+        assert_eq!(runs_on(&serde_json::json!(">=1.0-beta"), "1.0-alpha"), Some(false));
     }
 
     #[test]
