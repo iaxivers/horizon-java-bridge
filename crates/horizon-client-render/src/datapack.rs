@@ -81,10 +81,18 @@ impl DataPack {
             .collect()
     }
     pub fn read(&self, path: &str) -> Option<Vec<u8>> {
-        match &self.source {
+        let mut bytes = match &self.source {
             Source::Zip(z) => z.read(path).ok(),
             Source::Dir(root) => std::fs::read(root.join(path)).ok(),
+        }?;
+        // A JSON file without its leading byte-order mark: Minecraft's reader skips one (mods ship
+        // files saved with it: 395 in UMP's 300-mod pack, Lio's Overhauled Villages' worldgen
+        // among them), and serde_json refused it ("expected value at line 1 column 1"), which
+        // stopped that pack's world from opening. (UMP, 2026-11-13)
+        if (path.ends_with(".json") || path.ends_with(".mcmeta")) && bytes.starts_with(b"\xef\xbb\xbf") {
+            bytes.drain(..3);
         }
+        Some(bytes)
     }
 
     /// The `description` of `pack.mcmeta`, as text.
@@ -936,6 +944,20 @@ mod tests {
             Some("data_maps/mymod:item/fuel")
         );
         assert_eq!(content_id("data/mymod/data_maps/item/fuel.txt"), None);
+    }
+
+    #[test]
+    fn json_files_are_read_without_a_byte_order_mark() {
+        let root = std::env::temp_dir().join(format!("hz-datapack-bom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("data/m")).unwrap();
+        std::fs::write(root.join("data/m/a.json"), b"\xef\xbb\xbf{\"x\":1}").unwrap();
+        std::fs::write(root.join("data/m/b.nbt"), b"\xef\xbb\xbfraw").unwrap();
+        let pack = DataPack::folder("file/bom", &root);
+        let json = pack.read("data/m/a.json").unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&json).is_ok());
+        assert!(pack.read("data/m/b.nbt").unwrap().starts_with(b"\xef\xbb\xbf"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
