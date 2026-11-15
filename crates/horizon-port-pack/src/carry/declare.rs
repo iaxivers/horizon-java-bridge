@@ -19,7 +19,10 @@ pub(super) fn namespace(
     let prefix = format!("{ns}:");
     let decl = inside.join(format!("data/{ns}/horizon"));
     let write_decl = |kind: &str, name: &str, v: &Value| {
-        let text = serde_json::to_vec_pretty(v).unwrap_or_default();
+        // Compact: a block with many states (Diagonal Fences' snow fence: 9 layers x 8 sides) has a state
+        // table of millions of entries, 19 MiB pretty-printed (over the content reader's 16 MiB per file) and
+        // 5.6 MiB compact. Pretty-printing only cost load time and size. (UMP, 2026-11-11)
+        let text = serde_json::to_vec(v).unwrap_or_default();
         write(&decl.join(format!("{kind}/{name}.json")), &text)
     };
     // The report's names: the path under the id, `ns:path` under another namespace.
