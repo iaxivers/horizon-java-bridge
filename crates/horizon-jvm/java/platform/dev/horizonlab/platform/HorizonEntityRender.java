@@ -85,7 +85,11 @@ public final class HorizonEntityRender {
         // Block models once the client's are loaded (modelsLoaded): renderers that draw blocks
         // (Create's contraptions: their blocks through the model set) need the resolver.
         var blocks = HorizonClient.modelsReady() ? new net.minecraft.client.renderer.block.BlockModelResolver(mc.getModelManager()) : null;
-        context = new EntityRendererProvider.Context(dispatcher, blocks, items, null, null, models, null,
+        // The equipment assets (armour and wings' textures by asset id): an empty manager answers
+        // MISSING for each, so the player's renderer and mods' layers made with this context run
+        // (Better Combat's, Spell Engine's player layers failed on null). (UMP, 2026-11-11)
+        var equipment = new net.minecraft.client.resources.model.EquipmentAssetManager();
+        context = new EntityRendererProvider.Context(dispatcher, blocks, items, null, null, models, equipment,
                 mc.getAtlasManager(), mc.font, null, null);
         // Its renderers by type (renderer(): vanilla's and the mods'), for renderers that draw
         // another entity through it (Carry On's carried mob), and the players' (AvatarRenderer,
