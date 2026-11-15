@@ -1454,6 +1454,19 @@ public final class HorizonHooks {
         return null;
     }
 
+    /** Whether a handler's parameters (CallbackInfo last) are more than the CallbackInfo and match no overload of {@code method}. */
+    private static boolean takesLocals(Class<?> owner, String method, Class<?>[] params) {
+        int ci = -1;
+        for (int i = 0; i < params.length; i++) if (CallbackInfo.class.isAssignableFrom(params[i])) { ci = i; break; }
+        if (ci <= 0) return ci < 0;
+        Class<?>[] head = java.util.Arrays.copyOf(params, ci);
+        java.util.List<Class<?>[]> overloads = new java.util.ArrayList<>();
+        if (method.equals("<init>")) for (var c : owner.getDeclaredConstructors()) overloads.add(c.getParameterTypes());
+        else for (var mm : owner.getDeclaredMethods()) if (mm.getName().equals(method)) overloads.add(mm.getParameterTypes());
+        for (Class<?>[] o : overloads) if (java.util.Arrays.equals(o, head)) return params.length - 1 > ci;
+        return true;
+    }
+
     private static Object argument(Class<?> owner, Object self, Class<?> type, java.lang.reflect.Type generic) {
         if (type.isPrimitive()) return zero(type);
         // A level's stem (ServerLevel's constructor: its generator, which BCLib's and BetterEnd's
@@ -1549,6 +1562,11 @@ public final class HorizonHooks {
                 // The method's arguments, then the CallbackInfo; locals captured after it can't
                 // be given (no vanilla frame runs), so such a handler is left out.
                 if (params.length != arguments + 1 || !CallbackInfo.class.isAssignableFrom(params[arguments])) {
+                    // A handler shaped for another of the target's calls (only the CallbackInfo, or
+                    // exactly an overload's parameters) is the other fire's: Horizon fires both
+                    // shapes (MinecraftServer.<init>), so it runs there and isn't a gap. Only one
+                    // that takes more than any overload (captured locals) is said. (UMP, 2026-11-11)
+                    if (!takesLocals(owner, method, params)) continue;
                     if (FAILURES.merge("shape " + m, 1, Integer::sum) == 1) {
                         Natives.log("Mixin census: " + h.mod() + "'s " + h.handler() + " at " + at + " of "
                                 + owner.getSimpleName() + "." + method + " takes locals; Horizon can't give them");
