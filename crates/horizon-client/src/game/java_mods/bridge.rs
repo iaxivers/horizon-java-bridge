@@ -427,6 +427,22 @@ fn share_vulkan_instance() {
 /// Set once Java's start has ended, whether it started or not.
 static SETTLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The Java mods' client's first frame while the player is idle at the title, once their start
+/// has ended: asked each idle title frame, sent to Java once (it runs it on a thread of its own,
+/// and the mirror's first tick waits for it).
+pub(in crate::game) fn client_start_at_title() {
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ASKED.load(std::sync::atomic::Ordering::Relaxed)
+        || !SETTLED.load(std::sync::atomic::Ordering::SeqCst)
+        || !horizon_jvm::events::ready()
+    {
+        return;
+    }
+    ASKED.store(true, std::sync::atomic::Ordering::Relaxed);
+    log::info!("Java mods: their client's first frame starts at the title");
+    horizon_jvm::events::client_start_at_title();
+}
+
 /// Waits (up to `limit`) for the Java mods' start to end: whether the platform mod runs.
 pub(in crate::game) fn wait_for_java(limit: std::time::Duration) -> bool {
     let until = std::time::Instant::now() + limit;

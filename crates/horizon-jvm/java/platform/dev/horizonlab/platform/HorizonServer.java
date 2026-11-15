@@ -946,6 +946,11 @@ public final class HorizonServer {
         return HorizonFunctions.ready();
     }
 
+    /** The headless client's first frame now, on its own thread (HorizonClient.startAtTitle). */
+    public static void clientStartAtTitle() {
+        HorizonClient.startAtTitle();
+    }
+
     private static boolean starting;
 
     /**

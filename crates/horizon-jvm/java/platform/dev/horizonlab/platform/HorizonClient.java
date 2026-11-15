@@ -1829,19 +1829,19 @@ public final class HorizonClient {
             gpuParts = true;
             if (HorizonGpu.installed()) guiRenderer(minecraft.gameRenderer);
         }
-        tasks();
-        // ClientLifecycleEvents.CLIENT_STARTED: Minecraft's first frame, before any world (Jade
-        // finishes registering its tooltip providers there).
-        if (!started) {
-            started = true;
-            reloadClientResources();
-            // The GPU's shaders: the GUI pipelines' fallback cache over the client's resources
-            // (vanilla's and the mods' shaders), as Minecraft's start makes it.
-            if (HorizonGpu.installed() && minecraft.getResourceManager() != null) models();
-            HorizonServer.fireEach("ClientLifecycleEvents.CLIENT_STARTED",
-                    net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents.CLIENT_STARTED, l -> l.onClientStarted(minecraft));
-            reloadAddedListeners();
+        // The client's first frame, if it started at the title (startAtTitle): done before this tick.
+        Thread early = earlyStart;
+        if (early != null) {
+            try {
+                early.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            earlyStart = null;
+            renderThread();
         }
+        tasks();
+        clientStart();
         finishModels();
         // Its loading is done once the models are (Minecraft.isGameLoadFinished: MiniHUD draws
         // nothing before).
@@ -1955,6 +1955,54 @@ public final class HorizonClient {
     }
 
     private static boolean started;
+    private static volatile Thread earlyStart;
+
+    /**
+     * ClientLifecycleEvents.CLIENT_STARTED: Minecraft's first frame, before any world (Jade
+     * finishes registering its tooltip providers there), with the client's resource reload and the
+     * models' reload started before it. Once.
+     */
+    private static synchronized void clientStart() {
+        if (started) return;
+        started = true;
+        reloadClientResources();
+        // The GPU's shaders: the GUI pipelines' fallback cache over the client's resources
+        // (vanilla's and the mods' shaders), as Minecraft's start makes it.
+        if (HorizonGpu.installed() && minecraft.getResourceManager() != null) models();
+        HorizonServer.fireEach("ClientLifecycleEvents.CLIENT_STARTED",
+                net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents.CLIENT_STARTED, l -> l.onClientStarted(minecraft));
+        reloadAddedListeners();
+    }
+
+    /**
+     * The client's first frame (clientStart) while the player is idle at the title screen, on a
+     * thread of its own: a client's first frame comes before any world, and here it ran in the
+     * world's join (JourneyMap's CLIENT_STARTED ~2 s, the client reload and the models' start ~1 s,
+     * with 184 mods). Horizon asks for it from the title's frames while no world is being opened;
+     * the mirror's first tick waits for it. Started with a world opening at the same time it
+     * competed with the world's Java start and gained nothing (UMP, 2026-11-15).
+     * HORIZON_EARLY_CLIENT=0: on the first tick as before.
+     */
+    public static void startAtTitle() {
+        if (started || earlyStart != null || minecraft == null || minecraft.font == null
+                || "0".equals(System.getenv("HORIZON_EARLY_CLIENT"))) return;
+        ClassLoader loader = HorizonClient.class.getClassLoader();
+        Thread thread = new Thread(() -> {
+            Thread.currentThread().setContextClassLoader(loader);
+            long began = System.nanoTime();
+            try {
+                renderThread();
+                clientStart();
+            } catch (Throwable t) {
+                Natives.log("Horizon's client: its first frame failed: " + t);
+            }
+            Natives.log("Horizon's client: its first frame (resources, CLIENT_STARTED) ran at the title in "
+                    + (System.nanoTime() - began) / 1_000_000 + " ms");
+        }, "Horizon client start");
+        thread.setDaemon(true);
+        earlyStart = thread;
+        thread.start();
+    }
 
     /**
      * The client's block and item models, as Minecraft's resource reload makes them, now that

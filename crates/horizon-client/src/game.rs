@@ -19296,6 +19296,11 @@ impl Game<'_> {
             }
             return;
         }
+        // Idle at the title, the Java mods' start over: their client's first frame now, not in the
+        // world's join (java_mods::client_start_at_title).
+        if self.title.is_some() && self.pending_entry.is_none() && self.rest_loader.is_none() {
+            java_mods::client_start_at_title();
+        }
         if let Err(error) = horizon_client::spans::time("world_entry", || self.resume_world_entry())
         {
             self.error = Some(error);

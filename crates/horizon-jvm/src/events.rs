@@ -2349,6 +2349,16 @@ pub fn functions_ready() -> bool {
     .unwrap_or(true)
 }
 
+/// The headless client's first frame (its resource reload, CLIENT_STARTED) now, on a thread of
+/// its own, while the player is idle at the title: `HorizonServer.clientStartAtTitle`. Java runs
+/// it once.
+pub fn client_start_at_title() {
+    let _ = with_server(|env, class| {
+        env.call_static_method(class, "clientStartAtTitle", "()V", &[])?;
+        Ok(())
+    });
+}
+
 /// Whether the Java mods' client reads its network connection's packets (a mod hooks how a
 /// client's `Connection` reads them: ReplayMod, Flashback): `HorizonPacketTap.wanted`. Then
 /// the game keeps what the server sends the window's own player and passes it each tick
