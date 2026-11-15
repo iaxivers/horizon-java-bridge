@@ -60,7 +60,12 @@ public final class HorizonServer {
 
     private static MinecraftServer server;
     private static PlayerList playerList;
-    private static final Map<ResourceKey<Level>, ServerLevel> LEVELS = new LinkedHashMap<>();
+    /**
+     * The mirror's levels, in the order they were made; also the server's own map (mods iterate
+     * server.getAllLevels()). Made from more than one thread (the far terrain's noise thread), so
+     * changes go through makeLevel's lock and readers copy under it. (UMP, 2026-11-12)
+     */
+    private static final Map<ResourceKey<Level>, ServerLevel> LEVELS = java.util.Collections.synchronizedMap(new LinkedHashMap<>());
     private static final List<ServerPlayer> PLAYERS = new ArrayList<>();
     private static final Map<ServerLevel, List<ServerPlayer>> LEVEL_PLAYERS = new IdentityHashMap<>();
     private static final Map<UUID, ServerPlayer> BY_UUID = new HashMap<>();
@@ -545,7 +550,26 @@ public final class HorizonServer {
                 l -> l.onLevelLoad(server, level));
     }
 
+    /**
+     * One level made at a time, whichever thread asks: the far terrain's noise thread makes the
+     * dimension's level while the server thread makes another (a ConcurrentModificationException
+     * left the mirror without levels; every tick then failed). Reentrant: a level's setup may ask
+     * for another. (UMP, 2026-11-12)
+     */
     private static ServerLevel makeLevel(ResourceKey<Level> key) {
+        synchronized (LEVELS) {
+            return makeLevelLocked(key);
+        }
+    }
+
+    /** The levels made so far, a copy taken under makeLevel's lock. */
+    private static List<ServerLevel> levelsNow() {
+        synchronized (LEVELS) {
+            return new ArrayList<>(LEVELS.values());
+        }
+    }
+
+    private static ServerLevel makeLevelLocked(ResourceKey<Level> key) {
         return LEVELS.computeIfAbsent(key, k -> {
             ServerLevel level = allocate(ServerLevel.class);
             LevelAccess access = (LevelAccess) level;
@@ -1112,7 +1136,7 @@ public final class HorizonServer {
 
     /** The mirrored levels (one a dimension Horizon has). */
     public static java.util.List<ServerLevel> levels() {
-        return new ArrayList<>(LEVELS.values());
+        return levelsNow();
     }
 
     /** Player {@code i} of a tick's arrays, mirrored as Horizon gives it (made the first time). */
@@ -1229,7 +1253,7 @@ public final class HorizonServer {
                 PLAYERS.add(player);
                 BY_UUID.put(player.getUUID(), player);
             }
-            for (ServerLevel level : LEVELS.values()) LEVEL_PLAYERS.computeIfAbsent(level, l -> {
+            for (ServerLevel level : levelsNow()) LEVEL_PLAYERS.computeIfAbsent(level, l -> {
                 List<ServerPlayer> list = new ArrayList<>();
                 ((ServerLevelAccess) l).horizon$setPlayers(list);
                 return list;
@@ -1621,7 +1645,7 @@ public final class HorizonServer {
             }
             // MinecraftServer.createLevels: Fabric's LOAD for each (a level made before
             // this first tick too); later levels hear it as they are made (level()).
-            for (ServerLevel made : new ArrayList<>(LEVELS.values())) levelLoaded(made);
+            for (ServerLevel made : levelsNow()) levelLoaded(made);
             hook(server, MinecraftServer.class, "loadLevel", "()V", "RETURN", NO_ARGUMENTS);
             hook(server, MinecraftServer.class, "loadLevel", "()V", "TAIL", NO_ARGUMENTS);
             // The world spawn a started server has (its command source runs at it: Spawn Animations
@@ -1649,7 +1673,7 @@ public final class HorizonServer {
         // Their held uses of mods' items (LivingEntity.tick's updatingUsingItem: sandpaper).
         for (ServerPlayer p : BY_UUID.values()) tickUse(p);
         fireEach("ServerTickEvents.START_SERVER_TICK", ServerTickEvents.START_SERVER_TICK, l -> l.onStartTick(server));
-        for (ServerLevel level : new ArrayList<>(LEVELS.values())) {
+        for (ServerLevel level : levelsNow()) {
             fireEach("ServerTickEvents.START_LEVEL_TICK", ServerTickEvents.START_LEVEL_TICK, l -> l.onStartTick(level));
             hook(level, ServerLevel.class, "tick", TICK_SERVER, "HEAD", haveTime);
         }
@@ -1758,7 +1782,7 @@ public final class HorizonServer {
             }
         }
         // Each level's players, as its own list (vanilla's code reads level.players()).
-        for (ServerLevel level : LEVELS.values()) LEVEL_PLAYERS.computeIfAbsent(level, l -> {
+        for (ServerLevel level : levelsNow()) LEVEL_PLAYERS.computeIfAbsent(level, l -> {
             List<ServerPlayer> list = new ArrayList<>();
             ((ServerLevelAccess) l).horizon$setPlayers(list);
             return list;
@@ -1771,7 +1795,7 @@ public final class HorizonServer {
         }
 
         phase = HorizonProfile.add("players and events", phase);
-        for (ServerLevel level : new ArrayList<>(LEVELS.values())) {
+        for (ServerLevel level : levelsNow()) {
             hook(level, ServerLevel.class, "tick", TICK_SERVER, "RETURN", haveTime);
             hook(level, ServerLevel.class, "tick", TICK_SERVER, "TAIL", haveTime);
             fireEach("ServerTickEvents.END_LEVEL_TICK", ServerTickEvents.END_LEVEL_TICK, l -> l.onEndTick(level));
@@ -1799,7 +1823,7 @@ public final class HorizonServer {
         }
         phase = HorizonProfile.add("player tick hooks", phase);
         // Mod blocks' scheduled ticks and block entities, as their levels' ticks run them.
-        for (ServerLevel level : new ArrayList<>(LEVELS.values())) {
+        for (ServerLevel level : levelsNow()) {
             if (level.getBlockTicks() instanceof HorizonTicks<?> ticks) ticks.run(level);
             // The mods' fluids flow here (HorizonTicks: their scheduled fluid ticks).
             if (level.getFluidTicks() instanceof HorizonTicks<?> ticks) ticks.run(level);
@@ -1812,7 +1836,7 @@ public final class HorizonServer {
         playerMotionsAfter();
         phase = HorizonProfile.add("block entities", phase);
         HorizonChunkLoads.tick();
-        HorizonTickets.tick(new ArrayList<>(LEVELS.values()));
+        HorizonTickets.tick(levelsNow());
         HorizonSavedData.tick();
         HorizonDataFixer.check();
         phase = HorizonProfile.add("tickets, saved data", phase);
