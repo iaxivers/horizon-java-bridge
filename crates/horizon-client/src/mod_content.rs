@@ -2256,6 +2256,15 @@ impl Overlay<'_> {
         self.create(rel)?.write_all(bytes)?;
         Ok(())
     }
+    /// [`Self::write`] where `rel`'s directory is already real (`copy_plain_files`): no
+    /// directory is made, so threads may write at once.
+    fn write_existing_dir(&self, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
+        let path = self.out.join(rel);
+        if fs::symlink_metadata(&path).is_ok() {
+            fs::remove_file(&path)?;
+        }
+        fs::write(path, bytes)
+    }
     /// A new file at `rel` in place of the link to the base's.
     fn create(&self, rel: &str) -> Result<fs::File> {
         let rel = Path::new(rel);
@@ -2278,15 +2287,46 @@ fn link(target: &Path, at: &Path) -> std::io::Result<()> {
 }
 #[cfg(not(unix))]
 fn link(target: &Path, at: &Path) -> std::io::Result<()> {
-    if target.is_dir() {
-        fs::create_dir_all(at)?;
-        for entry in fs::read_dir(target)?.flatten() {
-            link(&entry.path(), &at.join(entry.file_name()))?;
+    if !target.is_dir() {
+        return link_file(target, at, |target, at| fs::hard_link(target, at));
+    }
+    // The tree's directories first, then its files by several threads at once: where no hard
+    // link can be made (the game folder on another drive than the prepared files) each file
+    // is a copy, and one at a time the base's ~23,000 took over 20 minutes from a USB disk,
+    // the game stuck after "content mod(s) made". (UMP, 2026-11-13)
+    let mut files = Vec::new();
+    let mut dirs = vec![(target.to_path_buf(), at.to_path_buf())];
+    while let Some((from, to)) = dirs.pop() {
+        fs::create_dir_all(&to)?;
+        for entry in fs::read_dir(&from)?.flatten() {
+            let (source, dest) = (entry.path(), to.join(entry.file_name()));
+            if source.is_dir() {
+                dirs.push((source, dest));
+            } else {
+                files.push((source, dest));
+            }
+        }
+    }
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16);
+    let chunk = files.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = files
+            .chunks(chunk)
+            .map(|part| {
+                scope.spawn(move || {
+                    for (source, dest) in part {
+                        link_file(source, dest, |target, at| fs::hard_link(target, at))?;
+                    }
+                    Ok::<(), std::io::Error>(())
+                })
+            })
+            .collect();
+        for job in jobs {
+            job.join()
+                .map_err(|_| std::io::Error::other("linking the overlay's files panicked"))??;
         }
         Ok(())
-    } else {
-        link_file(target, at, |target, at| fs::hard_link(target, at))
-    }
+    })
 }
 /// A file of the overlay where symlinks need a privilege: a hard link to the base's file, which costs a name where
 /// a copy costs the file's bytes (the base is ~28,000 files, 0.6 GiB), or a copy when no link can be made (another
@@ -2469,6 +2509,84 @@ impl TagMerge {
     }
 }
 
+/// Whether a mod's content file is only copied into the overlay, unread otherwise: not a tag or
+/// an atlas (merged across mods), not one of the mod's own declarations, not a biome modifier,
+/// worldgen entry or structure template (read again to be parsed).
+fn plain_file(id: &str, file: &str) -> bool {
+    let is_tag = file.starts_with("data/") && file.contains("/tags/") && file.ends_with(".json");
+    let atlas = file.starts_with("assets/minecraft/atlases/") && file.ends_with(".json");
+    let declaration = file.starts_with(&format!("data/{id}/horizon/"));
+    !is_tag
+        && !atlas
+        && !declaration
+        && !biomes::is_modifier(file)
+        && worldgen_entry(file).is_none()
+        && !(file.starts_with("data/") && file.contains("/structure/") && file.ends_with(".nbt"))
+}
+
+/// Every mod's content files that are copied as they are, by several threads: a big pack has
+/// over 150,000 (184 mods), and read and written one at a time they took most of the content
+/// build (minutes). A path two mods both have is written once, by the later one, as the
+/// sequential loop's last write left it. Files that are also parsed are copied here too.
+/// (UMP, 2026-11-13)
+fn copy_plain_files(mods: &[ContentMod], overlay: &Overlay<'_>) -> Result<()> {
+    // Who writes each path: the last mod with it.
+    let mut owner: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (index, m) in mods.iter().enumerate() {
+        let declarations = format!("data/{}/horizon/", m.id);
+        for file in &m.content.files {
+            let is_tag = file.starts_with("data/") && file.contains("/tags/") && file.ends_with(".json");
+            let atlas = file.starts_with("assets/minecraft/atlases/") && file.ends_with(".json");
+            if !is_tag && !atlas && !file.starts_with(&declarations) {
+                owner.insert(file.as_str(), index);
+            }
+        }
+    }
+    // The directories become real first, one at a time: the threads only write files.
+    let mut parents: std::collections::BTreeSet<&Path> = std::collections::BTreeSet::new();
+    for file in owner.keys() {
+        if let Some(parent) = Path::new(file).parent() {
+            parents.insert(parent);
+        }
+    }
+    for parent in parents {
+        overlay.dir(parent)?;
+    }
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 12);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| -> std::result::Result<(), String> {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(m) = mods.get(index) else {
+                            return Ok(());
+                        };
+                        let mut reader = m.content.reader()?;
+                        for file in &m.content.files {
+                            if owner.get(file.as_str()) != Some(&index) {
+                                continue;
+                            }
+                            let bytes = reader.read(file)?;
+                            overlay
+                                .write_existing_dir(file, &bytes)
+                                .map_err(|e| format!("{file}: {e}"))?;
+                        }
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker
+                .join()
+                .map_err(|_| "copying the mods' files panicked".to_string())??;
+        }
+        Ok::<(), String>(())
+    })?;
+    Ok(())
+}
+
 /// Threads rewriting the tables at once. Each holds a whole table as a tree
 /// (gameplay-facts.json's is over a gigabyte with ATM10's mods), so more
 /// would mostly add memory.
@@ -2570,10 +2688,14 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     let mut additions: BTreeMap<&str, Vec<Addition>> = BTreeMap::new();
     let mut modifiers = Vec::new();
     let mut atlases: BTreeMap<String, Vec<J>> = BTreeMap::new();
+    copy_plain_files(mods, &overlay)?;
     for m in mods {
         let declarations = format!("data/{}/horizon/", m.id);
         let mut reader = m.content.reader()?;
         for file in &m.content.files {
+            if plain_file(&m.id, file) {
+                continue;
+            }
             let bytes = reader.read(file)?;
             let is_tag = file.starts_with("data/") && file.contains("/tags/");
             if is_tag && file.ends_with(".json") {
@@ -2596,7 +2718,7 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
                     .or_default()
                     .extend(sources.iter().cloned());
             } else if !file.starts_with(&declarations) {
-                overlay.write(file, &bytes)?;
+                // Its copy was written with the plain files (`copy_plain_files`).
                 if biomes::is_modifier(file) {
                     let text = String::from_utf8(bytes).map_err(|e| format!("{file}: {e}"))?;
                     modifiers.extend(biomes::Modifier::read(&m.id, file, &text, &mut warnings)?);
