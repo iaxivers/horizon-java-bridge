@@ -1121,7 +1121,18 @@ public final class HorizonClient {
         };
         channel.remoteAddress();
         channel.localAddress();
+        // A handler stays in its pipeline, as a real connection's packet handler does: mods keep
+        // per-connection state on the pipeline's last handler context (Multiloader Data
+        // Extensions' known data maps: pipeline().lastContext().attr(...), null on an empty
+        // pipeline, which failed the player's configuration). Netty keeps handlers on a closed
+        // channel's pipeline only until it is deregistered, so it is added after close.
+        // (UMP, 2026-11-15)
         channel.close();
+        try {
+            channel.pipeline().addLast("horizon_packet_handler", new io.netty.channel.ChannelInboundHandlerAdapter());
+        } catch (Throwable t) {
+            Natives.log("Horizon's client: its connection's pipeline has no handler: " + t);
+        }
         try {
             set(net.minecraft.network.Connection.class, connection, "channel", channel);
         } catch (ReflectiveOperationException e) {
