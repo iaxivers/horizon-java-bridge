@@ -366,6 +366,7 @@ impl ChunkGenerator for JavaTerrain {
     /// shape), with the mods' biomes once they generate the dimension.
     fn lod_sampler(self: Arc<Self>) -> Box<dyn LodSampler> {
         Box::new(JavaLod {
+            terrain: self.clone(),
             inner: self.inner.clone().lod_sampler(),
             land: self.land.clone(),
             land_sampler: None,
@@ -665,6 +666,8 @@ impl horizon_client::vanillagen::BiomeOracle for JavaBiomes {
 /// mods' land) with each column's biome (its colours) and top block the mods' once they
 /// generate it; a mod's own generator's base columns when it isn't on the noise.
 struct JavaLod {
+    /// The generator it samples for: whether the mods generate the dimension is asked through it.
+    terrain: Arc<JavaTerrain>,
     inner: Box<dyn LodSampler>,
     /// The mods' noise's land, when they change it ([`NoiseLand`]), and its sampler.
     land: Arc<NoiseLand>,
@@ -685,6 +688,14 @@ impl JavaLod {
 
     /// The sampler of the land's shape: the mods' noise's when they change it, else Horizon's.
     fn land(&mut self) -> &mut Box<dyn LodSampler> {
+        // Until the mods say whether they generate the dimension (their worldgen starts beside
+        // the join), far terrain waits: a tile sampled before then took vanilla's land and kept
+        // it (UMP far_truth: 100 mods, far heights past 1 km were vanilla's, 20-50 blocks off).
+        // These are far terrain's own threads; nothing near waits on them. (UMP, 2026-11-12)
+        // Asked here when no chunk asked yet (a saved world's near chunks load from its save).
+        if self.modded.get().is_none() {
+            self.terrain.modded();
+        }
         if self.land_sampler.is_none()
             && self.modded()
             && let Some(terrain) = self.land.terrain()
@@ -898,6 +909,7 @@ impl JavaLod {
 impl LodSampler for JavaLod {
     fn fork(&self) -> Option<Box<dyn LodSampler>> {
         Some(Box::new(JavaLod {
+            terrain: self.terrain.clone(),
             inner: self.inner.fork()?,
             land: self.land.clone(),
             land_sampler: None,
