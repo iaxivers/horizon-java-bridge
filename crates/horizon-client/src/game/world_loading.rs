@@ -358,10 +358,65 @@ pub(super) fn preload_world_data(
     on_world_screens: bool,
     resources: &std::path::Path,
     registry: &'static horizon_world::registry::BlockRegistry,
+    biomes: &Arc<horizon_client::biome::Biomes>,
 ) {
     let mut preload = PRELOAD.lock().unwrap_or_else(|e| e.into_inner());
+    // With Java mods, at the title screen too (the mods' jars are read as data, not run): the worldgen data a
+    // new world reads (the plain bundle, and the bundle under the mods' data packs) took ~11 s
+    // of the click-to-world with 184 mods when nothing was read before the click (UMP
+    // player-flow test). A big mod pack's machine has the memory; it is kept (PRELOAD_KEPT
+    // counts only time spent away from the world screens, and the title isn't that here).
+    // (UMP, 2026-11-15)
+    if matches!(*preload, Preload::Idle) && super::java_mods::has_java_mods() {
+        let resources = resources.to_owned();
+        let biomes = biomes.clone();
+        let spawned = std::thread::Builder::new()
+            .name("World data preload".into())
+            .spawn(move || {
+                horizon_threads::behind_server();
+                let started = std::time::Instant::now();
+                let sync = spawn_sync_preload(&resources, true);
+                let plain = {
+                    let resources = resources.clone();
+                    std::thread::Builder::new()
+                        .name("World data preload".into())
+                        .spawn(move || {
+                            horizon_threads::behind_server();
+                            if let Ok(data) = horizon_client::vanillagen::shared_data(&resources.join("worldgen"), registry) {
+                                let _ = data.prepare_decoration("minecraft:normal", "minecraft:overworld");
+                            }
+                        })
+                        .ok()
+                };
+                // A new world's: no packs of its own, the mods' data under it (an empty world
+                // folder enables nothing beyond the defaults).
+                let none = std::path::PathBuf::new();
+                let (overrides, _) = worldgen_overrides_of(&none, &resources, &biomes, &[]);
+                if let Ok(data) = horizon_client::vanillagen::shared_data_with(&resources.join("worldgen"), &overrides, registry) {
+                    let _ = data.prepare_decoration("minecraft:normal", "minecraft:overworld");
+                }
+                let _recipe_files = horizon_client::json_folder::read(&resources.join("data/minecraft/recipe"));
+                let _ = horizon_client::structure_blocks::loot_data(&resources, &horizon_world::loot::PackOverlay::NONE);
+                join_sync_preload(sync, &resources);
+                if let Some(plain) = plain {
+                    let _ = plain.join();
+                }
+                log::info!(
+                    "Horizon: world data preloaded at the title (with the Java mods' data) in {} ms",
+                    started.elapsed().as_millis()
+                );
+            });
+        match spawned {
+            Ok(thread) => *preload = Preload::Started { thread, left: None },
+            Err(e) => log::warn!("Horizon: world data preload: {e}"),
+        }
+        return;
+    }
+    let java_title = super::java_mods::has_java_mods();
     match &mut *preload {
         Preload::Used => {}
+        // Kept at the title with Java mods (above): only dropped by leaving for Multiplayer.
+        Preload::Started { left, .. } if java_title && !on_world_screens => *left = None,
         Preload::Idle if on_world_screens => {
             let resources = resources.to_owned();
             let spawned = std::thread::Builder::new()
