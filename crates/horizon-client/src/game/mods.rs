@@ -198,6 +198,23 @@ pub(super) fn content_root(
             }
         }
     }
+    // More block states than a world holds: the biggest mods are left out, the rest load.
+    let too_big = mod_content::fit_states(root, &mut mods);
+    if !too_big.is_empty() {
+        let lines: Vec<String> = too_big
+            .iter()
+            .map(|(id, n)| {
+                format!(
+                    "{id} left out: its {n} block states don't fit beside the other mods' (a world holds {} in all)",
+                    mod_content::MAX_STATES
+                )
+            })
+            .collect();
+        for line in &lines {
+            log::warn!("Horizon: {line}");
+        }
+        *LEFT_OUT_FOR_STATES.lock().unwrap_or_else(|e| e.into_inner()) = lines;
+    }
     let built = horizon_client::spans::startup::time("content.resource_root", || {
         mod_content::resource_root(root, &mods, &horizon_cache())
     });
@@ -231,6 +248,9 @@ pub(super) fn content_root(
         }
     }
 }
+
+/// Content mods left out because their block states didn't fit (`fit_states`), as lines players read.
+pub(in crate::game) static LEFT_OUT_FOR_STATES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// A loaded mod as a server tells joining clients (`horizon_protocol::mod_list`): its manifest's
 /// id, version and side, and the SHA-256 of its `.hmod` (none for a folder).

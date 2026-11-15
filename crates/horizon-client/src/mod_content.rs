@@ -2933,6 +2933,73 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
 /// The root is built once and kept: later starts with the same build, base
 /// and mod files reuse it. With ATM10's carried mods a build takes about
 /// 25 s and peaks above 3 GB, more than everything the game keeps.
+/// The mods' new block states, by mod, as `Plan::new` counts them (each block's template states
+/// times its own property combinations, or its own states), without building anything.
+pub fn state_counts(base: &Path, mods: &[ContentMod]) -> Result<(u32, Vec<(String, u64)>)> {
+    let mut facts = read_json(&base.join("facts.json"))?;
+    let Some(J::Arr(states)) = facts.at("states") else {
+        return Err("facts.json: no states".into());
+    };
+    let mut runs: BTreeMap<&str, u64> = BTreeMap::new();
+    for s in states.iter() {
+        if let J::Arr(row) = s
+            && let Some(J::Str(name)) = row.first()
+        {
+            *runs.entry(name.as_str()).or_default() += 1;
+        }
+    }
+    let vanilla = states.len() as u32;
+    let counts = mods
+        .iter()
+        .map(|m| {
+            let n: u64 = m
+                .content
+                .blocks
+                .iter()
+                .map(|b| {
+                    if !b.states.is_empty() {
+                        return b.states.len() as u64;
+                    }
+                    let template = runs.get(b.template.as_str()).copied().unwrap_or(1);
+                    let combos = b
+                        .state_properties
+                        .values()
+                        .fold(1u64, |p, v| p.saturating_mul(v.values().len() as u64));
+                    template.saturating_mul(combos)
+                })
+                .sum();
+            (m.id.clone(), n)
+        })
+        .collect();
+    Ok((vanilla, counts))
+}
+
+/// Leaves out of `mods` the ones with the most block states until the rest fit in a world
+/// (MAX_STATES), returning the ids left out with their counts. Past the limit every content
+/// mod was refused together: a 300-mod pack (1.14M states, five mods with 70k-257k each: Diagonal
+/// Walls/Fences/Windows, Rechiseled, Yuushya) had none of its blocks. (UMP, 2026-11-15)
+pub fn fit_states(base: &Path, mods: &mut Vec<ContentMod>) -> Vec<(String, u64)> {
+    let Ok((vanilla, counts)) = state_counts(base, mods) else {
+        return Vec::new();
+    };
+    let mut total: u64 = u64::from(vanilla) + counts.iter().map(|(_, n)| n).sum::<u64>();
+    if total <= u64::from(MAX_STATES) {
+        return Vec::new();
+    }
+    let mut by_size = counts;
+    by_size.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut out = Vec::new();
+    for (id, n) in by_size {
+        if total <= u64::from(MAX_STATES) {
+            break;
+        }
+        total -= n;
+        out.push((id, n));
+    }
+    mods.retain(|m| !out.iter().any(|(id, _)| id == &m.id));
+    out
+}
+
 pub fn resource_root(base: &Path, mods: &[ContentMod], cache: &Path) -> Result<PathBuf> {
     if mods
         .iter()

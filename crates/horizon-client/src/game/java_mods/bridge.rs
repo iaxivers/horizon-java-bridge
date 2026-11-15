@@ -612,6 +612,8 @@ fn start_once(root: &Path, dir: &Path, jars: Vec<PathBuf>, side: horizon_jvm::Si
         let mut left: Vec<String> = left_out().iter().map(|l| l.line()).collect();
         // Mods that load but only partly work here (Flashback).
         left.extend(horizon_jvm::renderers::partial_lines(bridge.mods()));
+        // Content mods whose blocks didn't fit in a world (mods.rs: fit_states).
+        left.extend(super::super::mods::LEFT_OUT_FOR_STATES.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned());
         for line in &left {
             log::info!("Java mods: {line}");
         }

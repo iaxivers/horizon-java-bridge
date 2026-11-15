@@ -1491,6 +1491,13 @@ fn layer_split(
     layers: u32,
 ) -> std::result::Result<u32, String> {
     let mut split = requested.unwrap_or(SPRITE_SPLIT).min(max_layers).max(1);
+    // More sprites than the arrays hold at the usual split: wider arrays, up to the GPU's
+    // limit (a 300-mod pack has 18,134 block textures; at 2048 eight arrays hold 16,384, and the
+    // game refused to start on GPUs with 8192 layers per array). Only when needed: a full array
+    // is one texture. (UMP, 2026-11-15)
+    if requested.is_none() && layers > split * SPRITE_ARRAYS {
+        split = layers.div_ceil(SPRITE_ARRAYS).min(max_layers).max(split);
+    }
     if split > 1 && array_layers(split, gl) > max_layers {
         split -= 1;
     }
@@ -13037,6 +13044,9 @@ mod sprite_upload_tests {
         let err = layer_split(128, false, None, 1291).unwrap_err();
         assert!(err.contains("128 texture layers per array"), "{err}");
         assert!(layer_split(512, false, None, 512 * SPRITE_ARRAYS + 1).is_err());
+        // More sprites than eight arrays of 2048: wider arrays where the GPU allows.
+        assert_eq!(layer_split(8192, false, None, 18_134), Ok(2267));
+        assert!(layer_split(2048, false, None, 18_134).is_err());
     }
 
     #[test]
