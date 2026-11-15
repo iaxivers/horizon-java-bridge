@@ -20753,20 +20753,43 @@ fn gameplay_tables(
     progress: &Progress,
 ) -> std::result::Result<GameplayTables, String> {
     let facts_step = startup::step("core.block_facts");
-    // Read whole, then parsed from the buffer: `serde_json::from_reader`
-    // pulls through a `BufReader` and is measurably slower on a file this
-    // size than one read plus `from_slice`, which is how `BlockFacts` next
-    // door already reads its own. Same value either way.
-    let behaviour_bytes =
-        std::fs::read(root.join("block-behaviours.json")).map_err(|e| e.to_string())?;
-    let behaviour_json: serde_json::Value =
-        serde_json::from_slice(&behaviour_bytes).map_err(|e| e.to_string())?;
-    drop(behaviour_bytes);
-    let (facts, gameplay_projection) =
-        BlockFacts::load_with_projection(root, assets.registry, &behaviour_json, parallel)
-            .map_err(|e| e.to_string())?;
-    // Read again only if the level behaviours' snapshot misses (`load_world_rest`).
-    drop(behaviour_json);
+    // The decoded facts from the game's cache when they were made from these files: decoding the
+    // JSON took 13 s of each start with 184 mods (UMP). (UMP, 2026-11-14)
+    let cache = std::env::current_dir().unwrap_or_default().join(".horizon-cache");
+    let cached = BlockFacts::load_snapshot(&cache, root, assets.registry);
+    // HORIZON_FACTS_SNAPSHOT_CHECK=1: decode the JSON too and say whether they match.
+    let check = std::env::var_os("HORIZON_FACTS_SNAPSHOT_CHECK").is_some();
+    let (facts, gameplay_projection) = if let Some(cached) = cached.filter(|_| !check) {
+        cached
+    } else {
+        // Read whole, then parsed from the buffer: `serde_json::from_reader`
+        // pulls through a `BufReader` and is measurably slower on a file this
+        // size than one read plus `from_slice`, which is how `BlockFacts` next
+        // door already reads its own. Same value either way.
+        let behaviour_bytes =
+            std::fs::read(root.join("block-behaviours.json")).map_err(|e| e.to_string())?;
+        let behaviour_json: serde_json::Value =
+            serde_json::from_slice(&behaviour_bytes).map_err(|e| e.to_string())?;
+        drop(behaviour_bytes);
+        let (facts, projection) =
+            BlockFacts::load_with_projection(root, assets.registry, &behaviour_json, parallel)
+                .map_err(|e| e.to_string())?;
+        // Read again only if the level behaviours' snapshot misses (`load_world_rest`).
+        drop(behaviour_json);
+        if check {
+            let restored = BlockFacts::load_snapshot(&cache, root, assets.registry);
+            log::info!(
+                "Horizon: block facts snapshot check: {}",
+                match &restored {
+                    Some((r, _)) if r.same_as(&facts) => "the same as the JSON",
+                    Some(_) => "DIFFERENT from the JSON",
+                    None => "no snapshot",
+                }
+            );
+        }
+        facts.store_snapshot(&projection, &cache, root, assets.registry);
+        (facts, projection)
+    };
     horizon_client::block_contact::set_mod_blocks(
         facts
             .states

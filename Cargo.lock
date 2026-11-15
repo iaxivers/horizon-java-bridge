@@ -1597,8 +1597,11 @@ dependencies = [
  "horizon-core",
  "horizon-world",
  "log",
+ "lz4_flex",
+ "postcard",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
