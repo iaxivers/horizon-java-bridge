@@ -1080,7 +1080,10 @@ public final class HorizonWorldgen {
         for (ChunkStatus status : STEPS) {
             if (status.isAfter(target)) break;
             if (chunk.getPersistedStatus().isOrAfter(status)) continue;
-            synchronized (chunk) {
+            // UMP patch 2026-11-10: one lock per dimension instead of per chunk. Per-chunk locks deadlocked under
+            // parallel generation: each thread held one chunk and waited for a neighbour another held (see
+            // ump/poc/hang/threads.txt). The lock is reentrant, so a step that advances its neighbours still works.
+            synchronized (d) {
                 if (chunk.getPersistedStatus().isOrAfter(status)) continue;
                 ChunkStep step = ChunkPyramid.GENERATION_PYRAMID.getStepTo(status);
                 long started = HorizonProfile.start();
