@@ -694,6 +694,7 @@ public final class HorizonEntityRender {
 
     /** What its renderer draws now, and its name tag and shadow: the entry's look. */
     private static Look look(Entity entity) {
+        posing = entity;
         JsonObject o = new JsonObject();
         o.addProperty("w", entity.getBbWidth());
         o.addProperty("h", entity.getBbHeight());
@@ -1379,8 +1380,38 @@ public final class HorizonEntityRender {
      */
     private static final float PARTIAL_TICK = 0.999F;
 
+    /**
+     * HORIZON_JAVA_DEBUG=poses: each mod entity's model, once a second, as one line: its type, how far it moved
+     * since the last line, and the sum of its parts' rotations. A walking mob's limbs swing, so the sum changes;
+     * a frozen pose keeps it still (UMP's visual test reads these lines).
+     */
+    private static final boolean DEBUG_POSES = String.valueOf(System.getenv("HORIZON_JAVA_DEBUG")).contains("poses");
+    private static final Map<Entity, double[]> POSE_LOG = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+    private static Entity posing;
+    /** Ticks between pose lines (HORIZON_JAVA_POSE_EVERY, default 20): short enough not to catch a wing beat in step. */
+    private static final int POSE_EVERY = Math.max(1, Integer.parseInt(String.valueOf(System.getenv("HORIZON_JAVA_POSE_EVERY")).replaceAll("\\D", "").isEmpty() ? "20" : String.valueOf(System.getenv("HORIZON_JAVA_POSE_EVERY")).replaceAll("\\D", "")));
+
+    private static void logPose(JsonObject poses) {
+        Entity e = posing;
+        if (e == null || e.tickCount % POSE_EVERY != 0) return;
+        double rot = 0;
+        int parts = 0;
+        for (var en : poses.entrySet()) {
+            var a = en.getValue().getAsJsonArray();
+            rot += Math.abs(a.get(3).getAsDouble()) + Math.abs(a.get(4).getAsDouble()) + Math.abs(a.get(5).getAsDouble());
+            parts++;
+        }
+        double[] had = POSE_LOG.put(e, new double[] {e.getX(), e.getZ()});
+        double moved = had == null ? 0 : Math.hypot(e.getX() - had[0], e.getZ() - had[1]);
+        Natives.log("UMP-POSE " + BuiltInRegistries.ENTITY_TYPE.getKey(e.getType()) + " id=" + e.getId() + " tick=" + e.tickCount
+                + " moved=" + String.format(java.util.Locale.ROOT, "%.2f", moved) + " parts=" + parts
+                + " rot=" + String.format(java.util.Locale.ROOT, "%.4f", rot));
+    }
+
     @SuppressWarnings({"unchecked", "rawtypes"})
-    private static JsonArray modelsOf(Entity entity) {
+    private static JsonArray modelsOf(Entity server) {
+        // Its client twin when it has one: mods animate their mobs on the client (HorizonClientShadows).
+        Entity entity = HorizonClientShadows.drawn(server);
         JsonArray out = new JsonArray();
         EntityRenderer renderer = renderer(entity.getType());
         if (renderer == null) return out;
@@ -1579,6 +1610,7 @@ public final class HorizonEntityRender {
         JsonArray hidden = new JsonArray();
         JsonArray skipped = new JsonArray();
         poses(root, "root", poses, hidden, skipped);
+        if (DEBUG_POSES) logPose(poses);
         o.add("poses", poses);
         if (!hidden.isEmpty()) o.add("hidden", hidden);
         if (!skipped.isEmpty()) o.add("skip", skipped);

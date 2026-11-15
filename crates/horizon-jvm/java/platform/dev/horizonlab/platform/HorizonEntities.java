@@ -292,7 +292,25 @@ public final class HorizonEntities {
         entity.setOldPosAndRot();
         entity.tickCount++;
         entity.tick();
+        walkAnimation(entity);
+        HorizonClientShadows.tick(entity);
         for (Entity passenger : entity.getPassengers()) tickPassenger(entity, passenger);
+    }
+
+    /**
+     * Steps the walk animation (limb swing) as the client does. LivingEntity.aiStep calls
+     * calculateEntityAnimation only on a client level; mods' entities live on the mirror's server level
+     * and are drawn from there, so without this their walk animation never moved and every walking
+     * mod mob slid in its standing pose (UMP anim test: 47 of 66 mod mobs). Players are Horizon's.
+     */
+    private static void walkAnimation(Entity entity) {
+        if (!(entity instanceof net.minecraft.world.entity.LivingEntity living) || entity instanceof net.minecraft.world.entity.player.Player) return;
+        if (living.isRemoved() || living.isPassenger()) return;
+        try {
+            living.calculateEntityAnimation(false);
+        } catch (RuntimeException | Error e) {
+            // a mod's own animation code; its pose stays as it was
+        }
     }
 
     private static void tickPassenger(Entity vehicle, Entity passenger) {
