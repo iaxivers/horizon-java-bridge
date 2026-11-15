@@ -196,7 +196,18 @@ impl StateModels {
                 by_name.entry(state.name.as_str()).or_default().push(id);
             }
         }
-        for block in blocks.iter().copied().collect::<BTreeSet<_>>() {
+        let bind_step = crate::spans::startup::step("core.bake_states.bind");
+        let ordered: Vec<&str> = blocks.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
+        // Every block's blockstate file read up front, by several threads: a modded pack's tens
+        // of thousands of separate files, read one at a time in the loop below, took most of
+        // this step (minutes). (UMP, 2026-11-14)
+        let definition_texts: Vec<std::io::Result<String>> = crate::par::par_map(&ordered, |block| {
+            let (namespace, path) = block.split_once(':').unwrap_or(("minecraft", block));
+            horizon_core::prepared_files::read_to_string(
+                &root.join(format!("assets/{namespace}/blockstates/{path}.json")),
+            )
+        });
+        for (block, definition_text) in ordered.iter().copied().zip(definition_texts) {
             // Vanilla blocks come bare; content mods' blocks with their namespace.
             let (namespace, path) = block.split_once(':').unwrap_or(("minecraft", block));
             let name = format!("{namespace}:{path}");
@@ -242,9 +253,7 @@ impl StateModels {
             // gets no model, and the other blocks still load. A file several
             // packs provide binds each pack's definition on its own, bottom
             // first (`loadBlockStateDefinitionStack`).
-            let layers = match horizon_core::prepared_files::read_to_string(
-                &root.join(format!("assets/{namespace}/blockstates/{path}.json")),
-            )
+            let layers = match definition_text
             .map_err(|e| e.to_string())
             .and_then(|text| definition_layers(&text))
             {
@@ -324,6 +333,8 @@ impl StateModels {
                 choices.push(CompiledChoices::new(&definition)?);
             }
         }
+        drop(bind_step);
+        let resolve_step = crate::spans::startup::step("core.bake_states.resolve");
         let names: Vec<String> = variants.iter().map(|(name, _, _)| name.clone()).collect();
         let library = match models.block_library(root, names.clone()) {
             Ok(library) => library,
@@ -346,6 +357,8 @@ impl StateModels {
                 .flat_map(|model| model.textures.values())
                 .map(|material| material.sprite.as_str()),
         );
+        drop(resolve_step);
+        let _bake_step = crate::spans::startup::step("core.bake_states.bake");
         let mut baked = Vec::with_capacity(variants.len());
         let mut index = BTreeMap::new();
         for ((name, turns, lock), model) in variants.into_iter().zip(resolved) {
