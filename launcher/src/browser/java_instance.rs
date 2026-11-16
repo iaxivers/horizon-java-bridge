@@ -15,9 +15,25 @@ const MAX_DEPTH: usize = 4;
 pub struct Target {
     pub minecraft: String,
     pub loader: Option<String>,
+    /// A Horizon instance with Fabric 26.3 mods on (`Target::bridge`): its Fabric mods go in
+    /// `mods-java/` as they are, which the Java mod bridge runs, and Fabric API is Horizon's own.
+    pub bridge: bool,
 }
 
+/// Fabric API's Modrinth project: the bridge brings its own, pinned (`java_deps::resolve`).
+const FABRIC_API: &str = "P7dR8mSH";
+
 impl Target {
+    /// A Horizon instance that runs Fabric mods through the Java mod bridge: Fabric for
+    /// Minecraft `java_mods::MINECRAFT`, into `mods-java/`.
+    pub fn bridge() -> Self {
+        Target {
+            minecraft: crate::java_mods::MINECRAFT.into(),
+            loader: Some("fabric".into()),
+            bridge: true,
+        }
+    }
+
     /// Whether a file made for `loader` runs here. Quilt loads Fabric mods
     /// (<https://quiltmc.org/en/about/faq/>), so a Quilt instance takes them too.
     pub fn accepts(&self, loader: &str) -> bool {
@@ -35,10 +51,13 @@ impl Target {
                  for mods.",
                 self.minecraft
             )),
+            Kind::Mod if self.bridge => Ok(crate::java_mods::DIR),
             Kind::Mod => Ok("mods"),
             Kind::ResourcePack => Ok("resourcepacks"),
             Kind::Modpack => Err("A modpack is imported as its own instance.".into()),
             Kind::DataPack => Err("A data pack goes in a world.".into()),
+            // Horizon runs the shaders/ format itself.
+            Kind::Shader if self.bridge => Ok("shaderpacks"),
             Kind::Shader => Err("Shader packs for Java instances aren't supported yet.".into()),
         }
     }
@@ -73,7 +92,7 @@ impl Target {
     /// Whether this instance takes files of `kind` from the browser as they are: mods and
     /// resource packs.
     pub fn takes(&self, kind: Kind) -> bool {
-        matches!(kind, Kind::Mod | Kind::ResourcePack)
+        matches!(kind, Kind::Mod | Kind::ResourcePack) || (self.bridge && kind == Kind::Shader)
     }
 
     /// What it plays, as a search with no results names it: `Minecraft 1.21.1 with fabric`.
@@ -90,6 +109,14 @@ impl Target {
         let mut usable = versions.iter().filter(|v| {
             v.blocked.is_none() && v.file().is_some() && v.game_versions.contains(&self.minecraft)
         });
+        if kind == Kind::Shader {
+            // A shader pack lists its shader loaders (iris, optifine), and runs whatever the
+            // Minecraft version: the newest for this one, else the newest.
+            return usable
+                .clone()
+                .find(|v| v.game_versions.contains(&self.minecraft))
+                .or_else(|| versions.iter().find(|v| v.blocked.is_none() && v.file().is_some()));
+        }
         if kind != Kind::Mod {
             return usable.find(|v| v.loaders.iter().any(|l| l == "minecraft"));
         }
@@ -122,6 +149,9 @@ fn add(
     }
     if depth > MAX_DEPTH {
         return Err(format!("{}'s dependencies go too deep.", project.title));
+    }
+    if target.bridge && project.id == FABRIC_API {
+        return Ok(());
     }
     target.folder(project.kind)?;
     let versions = source.versions(&project)?;

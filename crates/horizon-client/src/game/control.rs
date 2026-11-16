@@ -875,6 +875,27 @@ impl Game<'_> {
                 self.apply_settings();
                 ok()
             }
+            // What far terrain holds at a block column: its ground's height and block, from the
+            // finest tile sampled there (UMP's far-terrain fidelity test compares it with the world).
+            "lod-ground" => {
+                let x: i32 = arg(1)?.parse()?;
+                let z: i32 = arg(2)?.parse()?;
+                let found = self.lod.as_ref().and_then(|lod| lod.ground(x, z));
+                let biome = self
+                    .lod
+                    .as_ref()
+                    .and_then(|lod| lod.ground_biome(x, z))
+                    .map(|id| self.res.biomes().get(id).name.to_string());
+                Ok(Some(match found {
+                    Some((height, state)) => json!({
+                        "ok": true,
+                        "height": height,
+                        "block": self.res.facts().get(state).name.to_string(),
+                        "biome": biome,
+                    }),
+                    None => json!({"ok": true, "height": null}),
+                }))
+            }
             "lod-distance" => {
                 let n: u32 = arg(1)?.parse()?;
                 if n > horizon_client::lod::MAX_CHUNKS {

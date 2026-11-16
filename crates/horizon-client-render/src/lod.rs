@@ -320,6 +320,12 @@ impl Column {
         if width == 1 {
             return columns[z * 16 + x].clone();
         }
+        // A height is drawn where at least a quarter of the footprint holds a block there
+        // (cells of 2 or less: any one column): with "any column", one tree made a 16x16 box
+        // of leaves and one high column raised the whole cell, far terrain's square boxes and
+        // blocky hills (user, 2026-11-14). Under what is drawn, a gap takes what any column
+        // holds there (trunks stay under their crowns, nothing hangs in the air).
+        // The footprint's span edges, sorted once for both sweeps.
         let mut events = Vec::new();
         for dz in z..z + width {
             for dx in x..x + width {
@@ -331,15 +337,41 @@ impl Column {
             }
         }
         events.sort_unstable_by_key(|event| event.0);
+        let any = Self::sweep(&events, 1);
+        if width <= 2 {
+            return any;
+        }
+        let most = Self::sweep(&events, (width * width / 4) as i32);
+        let mut out = Self::default();
+        for span in most.spans.iter() {
+            let from = out.spans.last().map(|s| s.max);
+            if let Some(from) = from
+                && from < span.min
+            {
+                for fill in any.spans.iter() {
+                    let (min, max) = (fill.min.max(from), fill.max.min(span.min));
+                    if min < max {
+                        out.push(Span { min, max, ..*fill });
+                    }
+                }
+            }
+            out.push(*span);
+        }
+        out.surface = most.surface;
+        out
+    }
+    /// The spans a footprint's sorted span edges give where at least `needed` of its columns
+    /// hold a block, in the material most of them hold there.
+    fn sweep(events: &[(i16, (BlockStateId, u16, u16), i32)], needed: i32) -> Self {
         let mut result = Self::default();
         let mut votes = Vec::<((BlockStateId, u16), i32)>::new();
         let mut sky = [0i32; 16];
         let mut block = [0i32; 16];
         let mut occupied = 0;
         let mut bottom = MIN_Y as i16;
-        for (y, material, change) in events {
+        for &(y, material, change) in events {
             if bottom < y {
-                if occupied > 0
+                if occupied >= needed
                     && let Some(&((state, biome), _)) =
                         votes.iter().max_by_key(|&(material, count)| {
                             (*count, std::cmp::Reverse((material.0.0, material.1)))
@@ -417,10 +449,13 @@ impl Column {
         chunk: &Chunk,
         kinds: &[u8],
         water: Option<BlockStateId>,
+        snow: &Snow,
         x: i32,
         z: i32,
     ) -> Self {
         let kind = |state: BlockStateId| kinds.get(state.0 as usize).copied().unwrap_or(0);
+        let kind_of = kind;
+        let snow_block = snow.block;
         let face_light = |y: i32| {
             let mut sky = 0;
             let mut block = 0;
@@ -456,6 +491,29 @@ impl Column {
                 let y = min + offset;
                 let mut state = BlockStateId(chunk.get(x, y, z));
                 let mut kind = kind(state);
+                if snow.layers.contains(&state.0) {
+                    // The snow layer stands for the snow block on the run below it: its top
+                    // face draws snow, the run's height unchanged.
+                    if let Some(snow) = snow_block
+                        && let Some(top) = column.spans.0.last_mut()
+                        && i32::from(top.max) == y
+                        && kind_of(top.state) & FLUID == 0
+                    {
+                        if top.max - top.min > 1 {
+                            top.max -= 1;
+                            let under = *top;
+                            column.push(Span {
+                                min: under.max,
+                                max: under.max + 1,
+                                state: snow,
+                                ..under
+                            });
+                        } else {
+                            top.state = snow;
+                        }
+                    }
+                    continue;
+                }
                 if kind & KEPT == 0 {
                     continue;
                 }
@@ -507,8 +565,10 @@ impl Column {
 /// A chunk's 256 columns (`Column::from_chunk`), on the far-terrain worker.
 pub(crate) fn summarize(chunk: &Chunk, kinds: &[u8]) -> Arc<[Column; 256]> {
     let water = water_source(kinds);
+    let none = Snow::default();
+    let snow = SNOW.get().unwrap_or(&none);
     Arc::new(std::array::from_fn(|i| {
-        Column::from_chunk(chunk, kinds, water, (i & 15) as i32, (i >> 4) as i32)
+        Column::from_chunk(chunk, kinds, water, snow, (i & 15) as i32, (i >> 4) as i32)
     }))
 }
 /// The water source state: the first plain kept fluid without light
@@ -528,9 +588,36 @@ const AIR: u8 = 4;
 /// waterlogged blocks that aren't kept): far terrain draws water there, or
 /// kelp reaching the surface leaves holes in the sea.
 const WATERY: u8 = 8;
+/// The snow layer and the snow block, by state (`snow_states`): far terrain draws a snow
+/// layer as the snow block's top on the ground under it. At a distance it is the ground's
+/// colour; left out, the grass under the snow showed and far snowy plains and mountains came
+/// out green. The kinds' high nibble is the light emission, so these are kept apart.
+/// (UMP, 2026-11-13)
+static SNOW: std::sync::OnceLock<Snow> = std::sync::OnceLock::new();
+/// The snow layer states and the snow block, for `Column::from_chunk`.
+#[derive(Default)]
+pub(crate) struct Snow {
+    layers: FxHashSet<u32>,
+    block: Option<BlockStateId>,
+}
 /// What `Column::from_chunk` needs of each block state, read from the facts
 /// once: matching their names for every block made observing a chunk slow.
 pub(crate) fn state_kinds(facts: &BlockFacts) -> Vec<u8> {
+    SNOW.get_or_init(|| {
+        let mut layers = FxHashSet::default();
+        let mut block = None;
+        for i in 0..facts.states.len() {
+            let state = BlockStateId(i as u32);
+            match &*facts.get(state).name {
+                "minecraft:snow" => {
+                    layers.insert(i as u32);
+                }
+                "minecraft:snow_block" if block.is_none() => block = Some(state),
+                _ => {}
+            }
+        }
+        Snow { layers, block }
+    });
     (0..facts.states.len())
         .map(|i| {
             let state = BlockStateId(i as u32);
@@ -1681,6 +1768,21 @@ impl Lod {
     /// its block, from the finest tile sampled there. For aiming past the
     /// resident chunks (`game.raycast`); water is passed, as the view's ray
     /// passes it.
+    /// The far column's biome at block column (x, z), from the finest tile sampled there.
+    pub fn ground_biome(&self, x: i32, z: i32) -> Option<u16> {
+        (0..=MAX_LEVEL).find_map(|level| {
+            let size = 16 << level;
+            let key = TileKey {
+                x: x.div_euclid(size),
+                z: z.div_euclid(size),
+                level,
+            };
+            let columns = self.ready.get(&key).filter(|c| c.len() == CELLS * CELLS)?;
+            let cell = size / CELLS as i32;
+            let (cx, cz) = ((x - key.x * size) / cell, (z - key.z * size) / cell);
+            Some(columns[cz as usize * CELLS + cx as usize].surface?.biome)
+        })
+    }
     pub fn ground(&self, x: i32, z: i32) -> Option<(i32, BlockStateId)> {
         (0..=MAX_LEVEL).find_map(|level| {
             let size = 16 << level;
@@ -3649,6 +3751,28 @@ mod tests {
         assert!(!nearly_full("minecraft:wheat"));
     }
     #[test]
+    fn a_snow_layer_is_drawn_as_snow_on_the_ground_under_it() {
+        // 0 air, 1 grass, 2 snow layer (not kept), 3 snow block.
+        let kinds = [AIR, KEPT, 0, KEPT];
+        let snow = Snow {
+            layers: FxHashSet::from_iter([2]),
+            block: Some(BlockStateId(3)),
+        };
+        let mut chunk = Chunk::empty(0, 0);
+        for y in MIN_Y..64 {
+            chunk.set(5, y, 5, 1);
+            chunk.set(6, y, 5, 1);
+        }
+        chunk.set(5, 64, 5, 2);
+        let snowy = Column::from_chunk(&chunk, &kinds, None, &snow, 5, 5);
+        let bare = Column::from_chunk(&chunk, &kinds, None, &snow, 6, 5);
+        let top = snowy.spans.last().unwrap();
+        assert_eq!((top.min, top.max, top.state), (63, 64, BlockStateId(3)));
+        assert_eq!(snowy.surface.unwrap().state, BlockStateId(3));
+        assert_eq!(snowy.surface.unwrap().height, 64, "the ground keeps its height");
+        assert_eq!(bare.surface.unwrap().state, BlockStateId(1));
+    }
+    #[test]
     fn kelp_to_the_surface_is_drawn_as_water() {
         // 0 air, 1 stone, 2 water, 3 kelp (holds water, draws as none).
         let kinds = [AIR, KEPT, KEPT | FLUID, KEPT | FLUID | WATERY];
@@ -3664,8 +3788,8 @@ mod tests {
         }
         let water = water_source(&kinds);
         assert_eq!(water, Some(BlockStateId(2)));
-        let kelp = Column::from_chunk(&chunk, &kinds, water, 3, 3);
-        let sea = Column::from_chunk(&chunk, &kinds, water, 4, 3);
+        let kelp = Column::from_chunk(&chunk, &kinds, water, &Snow::default(), 3, 3);
+        let sea = Column::from_chunk(&chunk, &kinds, water, &Snow::default(), 4, 3);
         assert_eq!(kelp.spans, sea.spans);
         assert_eq!(
             kelp.spans.last().map(|s| (s.min, s.max, s.state)),
@@ -3705,10 +3829,28 @@ mod tests {
             [span(0, 4, 1), span(4, 12, 2), span(12, 14, 3)]
         );
         assert_eq!(reduced.get(4, 8, 4).spans, [span(0, 4, 1)]);
+        // One tree in a corner of a 16-wide cell (16 of its 256 columns) is not the cell's: it
+        // made a 16x16 box of leaves from afar (user, 2026-11-14).
         assert_eq!(
             reduced.get(0, 0, 16).spans,
+            [span(0, 4, 1)],
+            "one small crown does not cover a whole wide cell"
+        );
+        // A crown over a quarter of the cell or more is drawn, on its trunk.
+        let mut columns = std::array::from_fn(|_| Column {
+            surface: None,
+            spans: vec![span(0, 4, 1)].into(),
+        });
+        columns[0].spans.push(span(4, 12, 2));
+        for z in 0..8 {
+            for x in 0..8 {
+                columns[z * 16 + x].spans.push(span(12, 14, 3));
+            }
+        }
+        assert_eq!(
+            Column::reduced(&columns, 0, 0, 16).spans,
             [span(0, 4, 1), span(4, 12, 2), span(12, 14, 3)],
-            "a crown over one corner of a wide cell still sits on its trunk"
+            "a crown over a quarter of a wide cell still sits on its trunk"
         );
     }
     /// A chunk is reduced to the one cell width that reads it, when it does.

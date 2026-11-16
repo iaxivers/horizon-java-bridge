@@ -159,6 +159,43 @@ impl WorldgenOverrides {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty() && self.tags.is_empty() && self.templates.is_empty()
     }
+    /// Where these differ from `other`, for the log: the bundles whose entries or tags differ
+    /// (with how many ids each side has) and whether the templates do.
+    pub fn differences(&self, other: &Self) -> Vec<String> {
+        let mut out = Vec::new();
+        let names: std::collections::BTreeSet<&String> =
+            self.entries.keys().chain(other.entries.keys()).collect();
+        for name in names {
+            let (a, b) = (self.entries.get(name), other.entries.get(name));
+            if a != b {
+                let ids = |m: Option<&BTreeMap<String, String>>| m.map_or(0, BTreeMap::len);
+                let only: Vec<&String> = a
+                    .into_iter()
+                    .flatten()
+                    .filter(|(k, _)| !b.is_some_and(|b| b.contains_key(*k)))
+                    .map(|(k, _)| k)
+                    .take(3)
+                    .collect();
+                out.push(format!("{name} ({} vs {}; e.g. {only:?})", ids(a), ids(b)));
+            }
+        }
+        let tags: std::collections::BTreeSet<&String> =
+            self.tags.keys().chain(other.tags.keys()).collect();
+        for name in tags {
+            let (a, b) = (self.tags.get(name), other.tags.get(name));
+            if a != b {
+                out.push(format!(
+                    "tags {name} ({} vs {})",
+                    a.map_or(0, Vec::len),
+                    b.map_or(0, Vec::len)
+                ));
+            }
+        }
+        if self.templates != other.templates {
+            out.push("templates".into());
+        }
+        out
+    }
     /// A pack's file for `id` in `bundle`: called for packs from the lowest
     /// to the highest, so the last call for an id wins.
     pub fn set(&mut self, bundle: &str, id: &str, json: String) {

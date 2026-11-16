@@ -235,6 +235,18 @@ impl JavaTerrain {
             if !modded {
                 self.custom.get_or_init(|| false);
                 self.inner.no_oracle();
+            } else {
+                // The far terrain's land from the mods' noise (exported from Java, then a second
+                // generator's data: 10-20 s with a big pack) is made now, beside the join, not when
+                // the first far tile asks for it: far terrain then fills in once the world is in
+                // instead of starting the wait there. (UMP, 2026-11-11)
+                let land = self.land.clone();
+                let _ = std::thread::Builder::new()
+                    .name("Far terrain noise".into())
+                    .spawn(move || {
+                        horizon_threads::far_terrain_current();
+                        let _ = land.terrain();
+                    });
             }
             modded
         })
@@ -354,6 +366,7 @@ impl ChunkGenerator for JavaTerrain {
     /// shape), with the mods' biomes once they generate the dimension.
     fn lod_sampler(self: Arc<Self>) -> Box<dyn LodSampler> {
         Box::new(JavaLod {
+            terrain: self.clone(),
             inner: self.inner.clone().lod_sampler(),
             land: self.land.clone(),
             land_sampler: None,
@@ -361,6 +374,7 @@ impl ChunkGenerator for JavaTerrain {
             custom: self.custom.clone(),
             registry: self.registry,
             materials: Arc::new(OnceLock::new()),
+            foliage: Arc::new(OnceLock::new()),
             oracle: JavaBiomes {
                 dimension: self.dimension.clone(),
                 biomes: self.biomes.clone(),
@@ -653,6 +667,8 @@ impl horizon_client::vanillagen::BiomeOracle for JavaBiomes {
 /// mods' land) with each column's biome (its colours) and top block the mods' once they
 /// generate it; a mod's own generator's base columns when it isn't on the noise.
 struct JavaLod {
+    /// The generator it samples for: whether the mods generate the dimension is asked through it.
+    terrain: Arc<JavaTerrain>,
     inner: Box<dyn LodSampler>,
     /// The mods' noise's land, when they change it ([`NoiseLand`]), and its sampler.
     land: Arc<NoiseLand>,
@@ -663,6 +679,8 @@ struct JavaLod {
     /// What the land is made of ([`JavaLod::materials`]), shared by the samplers.
     materials:
         Arc<OnceLock<Option<std::collections::HashSet<horizon_world::registry::BlockStateId>>>>,
+    /// Each of the mods' biomes' tree leaves, by biome id ([`JavaLod::foliage`]).
+    foliage: Arc<OnceLock<std::collections::HashMap<u16, horizon_world::registry::BlockStateId>>>,
     oracle: JavaBiomes,
 }
 
@@ -673,6 +691,14 @@ impl JavaLod {
 
     /// The sampler of the land's shape: the mods' noise's when they change it, else Horizon's.
     fn land(&mut self) -> &mut Box<dyn LodSampler> {
+        // Until the mods say whether they generate the dimension (their worldgen starts beside
+        // the join), far terrain waits: a tile sampled before then took vanilla's land and kept
+        // it (UMP far_truth: 100 mods, far heights past 1 km were vanilla's, 20-50 blocks off).
+        // These are far terrain's own threads; nothing near waits on them. (UMP, 2026-11-12)
+        // Asked here when no chunk asked yet (a saved world's near chunks load from its save).
+        if self.modded.get().is_none() {
+            self.terrain.modded();
+        }
         if self.land_sampler.is_none()
             && self.modded()
             && let Some(terrain) = self.land.terrain()
@@ -850,6 +876,67 @@ impl JavaLod {
         }
     }
 
+    /// The mods' biomes' tree leaves by biome id, asked once (`HorizonWorldgen.lodFoliage`).
+    fn foliage(&self) -> &std::collections::HashMap<u16, horizon_world::registry::BlockStateId> {
+        self.foliage.get_or_init(|| {
+            let pairs = horizon_jvm::events::worldgen_lod_foliage(&self.oracle.dimension)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            log::info!(
+                "Java mods: far canopies: {} of the mods' biomes have their own trees ({})",
+                pairs.len(),
+                pairs
+                    .iter()
+                    .take(12)
+                    .map(|(b, s)| format!("{b}={s}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            pairs
+                .iter()
+                .filter_map(|(biome, state)| {
+                    // An id Horizon doesn't know falls back to plains there: skipped instead.
+                    let id = self.oracle.biomes.id(biome);
+                    if self.oracle.biomes.get(id).name != *biome {
+                        return None;
+                    }
+                    Some((id, parse_state(self.registry, state)?))
+                })
+                .collect()
+        })
+    }
+
+    /// Far canopies take their biome's own trees' leaves: Horizon plants its trees (vanilla's
+    /// oak, birch, spruce) in a far tile, and in the mods' biomes those are the mods' (Biomes O'
+    /// Plenty's fir and maple). UMP far_truth: 1 in 11 far tops matched the world before.
+    fn leaves(&self, columns: &mut [&mut horizon_client::lod::Column]) {
+        let foliage = self.foliage();
+        if foliage.is_empty() {
+            return;
+        }
+        for column in columns.iter_mut() {
+            let Some(top) = column.spans.last() else { continue };
+            let Some(&leaves) = foliage.get(&top.biome) else { continue };
+            for span in column.spans.iter_mut() {
+                if span.state != leaves && self.is_leaves(span.state) {
+                    span.state = leaves;
+                }
+            }
+            if let Some(surface) = column.surface.as_mut()
+                && self.is_leaves(surface.state)
+            {
+                surface.state = leaves;
+            }
+        }
+    }
+
+    fn is_leaves(&self, state: horizon_world::registry::BlockStateId) -> bool {
+        self.registry
+            .state(state)
+            .is_some_and(|s| s.name.ends_with("_leaves"))
+    }
+
     /// Sets each column's biome to the mods' at `(x, surface, z)`.
     fn remap(&self, columns: &mut [&mut horizon_client::lod::Column], at: &[(i32, i32)]) {
         let blocks: Vec<[i32; 3]> = columns
@@ -868,6 +955,7 @@ impl JavaLod {
             }
         }
         self.tops(columns, at);
+        self.leaves(columns);
     }
 
     fn remap_one(
@@ -886,6 +974,7 @@ impl JavaLod {
 impl LodSampler for JavaLod {
     fn fork(&self) -> Option<Box<dyn LodSampler>> {
         Some(Box::new(JavaLod {
+            terrain: self.terrain.clone(),
             inner: self.inner.fork()?,
             land: self.land.clone(),
             land_sampler: None,
@@ -893,6 +982,7 @@ impl LodSampler for JavaLod {
             custom: self.custom.clone(),
             registry: self.registry,
             materials: self.materials.clone(),
+            foliage: self.foliage.clone(),
             oracle: JavaBiomes {
                 dimension: self.oracle.dimension.clone(),
                 biomes: self.oracle.biomes.clone(),

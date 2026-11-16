@@ -11,12 +11,13 @@ use std::path::{Component, Path, PathBuf};
 
 pub(crate) const MANIFEST: &str = "mod-browser.json";
 /// The folders the browser installs into: an entry's `file` is always inside one of them.
-const FOLDERS: [&str; 5] = [
+const FOLDERS: [&str; 6] = [
     "mods",
     "resourcepacks",
     "shaderpacks",
     super::java::MODS_DIR,
     crate::native_mods::INSTALLED,
+    crate::java_mods::DIR,
 ];
 /// How deep required dependencies are followed.
 const MAX_DEPTH: usize = 4;

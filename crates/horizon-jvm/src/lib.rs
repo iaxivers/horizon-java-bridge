@@ -388,12 +388,14 @@ pub fn start(config: &Config) -> Result<&'static Bridge, String> {
     }
     class_path.extend(config.class_path.iter().cloned());
     let log_config = write_jar(&config.work, "log4j2-horizon.xml", LOG4J_CONFIG.as_bytes())?;
+    // Where Java may keep files between runs (the converted structure templates of mods).
+    let work_property = format!("-Dhorizon.work={}", option_path(&config.work)?.display());
     let vm = create_vm(
         &config.home,
         &class_path,
         config.class_archive.as_deref(),
         &log_config,
-        &[],
+        &[work_property],
     )?;
     let mut env = vm
         .attach_current_thread_permanently()
@@ -409,8 +411,18 @@ pub fn start(config: &Config) -> Result<&'static Bridge, String> {
             let mods =
                 start_fabric(&mut env, fabric, &add_mods).map_err(|e| describe(&mut env, e))?;
             if platform {
-                prepare_data(&mut env, &config.work.join("datapacks"))
-                    .map_err(|e| describe(&mut env, e))?;
+                prepare_data(&mut env, &config.work.join("datapacks")).map_err(|e| {
+                    let why = describe(&mut env, e);
+                    // A mod whose client start failed half way can leave the data load failing
+                    // with a message that names none of them: name them as the likely cause.
+                    match client_failures(&mut env) {
+                        Some(mods) => format!(
+                            "{why}. These mods failed while starting, which can cause this \
+                             (try without them, or check they work together): {mods}"
+                        ),
+                        None => why,
+                    }
+                })?;
             }
             mods
         }
@@ -606,16 +618,21 @@ fn create_vm(
             option_path(log_config)?.display()
         ),
         format!("-Djava.class.path={}", joined.to_string_lossy()),
-        // The heap gives back what it doesn't use: G1 keeps all it ever grew to otherwise (a
-        // 107-jar pack: 555 MB live in 1.2-1.5 GB committed), and the game's own memory is
-        // in the same process. Shrinks after full GCs and concurrent cycles; the periodic cycle
-        // lets an idle heap shrink too.
-        "-XX:+UseG1GC".into(),
-        "-XX:MinHeapFreeRatio=10".into(),
-        "-XX:MaxHeapFreeRatio=30".into(),
-        "-XX:G1PeriodicGCInterval=30000".into(),
+        // ZGC: the mods' collections run beside the game instead of pausing it. With 100 mods G1's
+        // young and mixed pauses (20-56 ms, every second or so in a 3 GB heap) were the stutters
+        // of a flight: UMP perf_test, 3 runs each, 1% low 65-70 fps with ZGC against 47-50 with
+        // G1, averages the same. It gives back memory it doesn't use (ZUncommit, on by default),
+        // as the G1 settings here did: the game's own memory is in the same process. (UMP, 2026-11-11)
+        "-XX:+UseZGC".into(),
+        "-XX:ZUncommitDelay=60".into(),
         // Mods' identifiers and the mirror's names repeat: ~1.3M strings in a big pack.
         "-XX:+UseStringDeduplication".into(),
+        // Mods' online checks (update checkers, Patreon lists: Xaero's maps) opened with
+        // URLConnection's default of no timeout waited ~10 s each for the system's connect timeout
+        // on the world's start when a host didn't answer (UMP load-time test, 100 mods). A short
+        // connect timeout lets them fail fast; mods that set their own keep theirs.
+        "-Dsun.net.client.defaultConnectTimeout=3000".into(),
+        "-Dsun.net.client.defaultReadTimeout=5000".into(),
     ];
     if let Some(archive) = archive {
         options.push("-XX:+AutoCreateSharedArchive".into());
@@ -991,6 +1008,23 @@ fn start_fabric(
         env.delete_local_ref(item)?;
     }
     Ok(out)
+}
+
+/// The mods whose client start failed (`FabricBoot.clientFailures`), if any.
+fn client_failures(env: &mut JNIEnv) -> Option<String> {
+    let value = env
+        .get_static_field(
+            "dev/horizonlab/bridge/fabric/FabricBoot",
+            "clientFailures",
+            "Ljava/lang/String;",
+        )
+        .and_then(|v| v.l())
+        .ok()?;
+    if value.is_null() {
+        return None;
+    }
+    let text: String = env.get_string(&JString::from(value)).ok()?.into();
+    (!text.is_empty()).then_some(text)
 }
 
 /// Loads the server's data (vanilla's data pack and the mods'): `HorizonData.prepare`, in the

@@ -17,6 +17,10 @@ import org.apache.logging.log4j.core.config.Property;
  * ({@code [java] [logger/LEVEL] message}), which prints it on the console as well.
  */
 public final class HorizonLog extends AbstractAppender {
+    /** Lines of one logger and message pattern said in full; the rest are counted. */
+    private static final int SAID = 20;
+    private static final java.util.concurrent.ConcurrentHashMap<String, Integer> REPEATS = new java.util.concurrent.ConcurrentHashMap<>();
+
     private HorizonLog() {
         super("Horizon", null, null, true, Property.EMPTY_ARRAY);
     }
@@ -47,6 +51,26 @@ public final class HorizonLog extends AbstractAppender {
         if (logger == null || logger.isEmpty()) logger = "?";
         int dot = logger.lastIndexOf('.');
         if (dot >= 0 && dot < logger.length() - 1) logger = logger.substring(dot + 1);
+        // A warning a mod (or the game for it) gives for every one of thousands of things
+        // (ModelManager's "Missing model for variant", once per block state: 375,000 lines with
+        // Diagonal Walls and Fences, 4 s of a world's join and 100 MB of log) is said a few times,
+        // then counted. Errors are always said. (UMP, 2026-11-13)
+        if (!level.isMoreSpecificThan(Level.ERROR) && event.getMessage() != null) {
+            String format = event.getMessage().getFormat();
+            if (format != null) {
+                String key = logger + '|' + (format.length() > 60 ? format.substring(0, 60) : format);
+                int n = REPEATS.merge(key, 1, Integer::sum);
+                if (n == SAID + 1) {
+                    try {
+                        Natives.log("[" + logger + "/" + level.name() + "] (more lines like this are counted, not logged: "
+                                + key.substring(key.indexOf('|') + 1) + "...)");
+                    } catch (Throwable t) {
+                        // Nowhere to write it.
+                    }
+                }
+                if (n > SAID) return;
+            }
+        }
         StringBuilder line = new StringBuilder();
         line.append('[').append(logger).append('/').append(level.name()).append("] ");
         line.append(event.getMessage() == null ? "" : event.getMessage().getFormattedMessage());

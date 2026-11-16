@@ -1206,7 +1206,10 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) -> Result<(), Str
     };
     for entry in read.flatten() {
         let path = entry.path();
-        let meta = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        // The listing's own metadata (on Windows it comes with the directory read, as
+        // symlink_metadata's does: a link is not followed), not a stat per file: a big pack's
+        // 200k content files took most of a start's content read. (UMP, 2026-11-14)
+        let meta = entry.metadata().map_err(|e| e.to_string())?;
         if meta.is_dir() {
             walk(root, &path, out)?;
         } else if meta.is_file() {

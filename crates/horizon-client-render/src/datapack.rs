@@ -49,6 +49,39 @@ impl DataPack {
         let Source::Dir(root) = &self.source else {
             return self.list("data/");
         };
+        // A prepared root (the game's own, or the mods' content root) lists its files from its
+        // data file: walking a big pack's content root folder by folder, 13 kinds in hundreds of
+        // namespaces, stat'ing every entry, took tens of seconds of a world's open. (UMP, 2026-11-14)
+        if let Some(files) = horizon_core::prepared_files::files_under(&root.join("data")) {
+            // `files_under` names them from `data/`: `<namespace>/<kind>/...`.
+            let mut out: Vec<String> = files
+                .into_iter()
+                .map(|f| format!("data/{f}"))
+                .filter(|f| {
+                    f.strip_prefix("data/")
+                        .and_then(|r| r.split_once('/'))
+                        .is_some_and(|(_, r)| {
+                            kinds.iter().any(|k| {
+                                r.strip_prefix(k).is_some_and(|r| r.starts_with('/'))
+                            })
+                        })
+                })
+                .collect();
+            // In walk order: namespace, then kind, then path.
+            out.sort_by(|a, b| {
+                let key = |f: &str| {
+                    let r = f.strip_prefix("data/").unwrap_or(f);
+                    let (ns, rest) = r.split_once('/').unwrap_or((r, ""));
+                    let k = kinds
+                        .iter()
+                        .position(|k| rest.strip_prefix(k).is_some_and(|r| r.starts_with('/')))
+                        .unwrap_or(usize::MAX);
+                    (ns.to_owned(), k, rest.to_owned())
+                };
+                key(a).cmp(&key(b))
+            });
+            return out;
+        }
         let Ok(entries) = std::fs::read_dir(root.join("data")) else {
             return Vec::new();
         };
@@ -81,10 +114,18 @@ impl DataPack {
             .collect()
     }
     pub fn read(&self, path: &str) -> Option<Vec<u8>> {
-        match &self.source {
+        let mut bytes = match &self.source {
             Source::Zip(z) => z.read(path).ok(),
-            Source::Dir(root) => std::fs::read(root.join(path)).ok(),
+            Source::Dir(root) => horizon_core::prepared_files::read(&root.join(path)).ok(),
+        }?;
+        // A JSON file without its leading byte-order mark: Minecraft's reader skips one (mods ship
+        // files saved with it: 395 in UMP's 300-mod pack, Lio's Overhauled Villages' worldgen
+        // among them), and serde_json refused it ("expected value at line 1 column 1"), which
+        // stopped that pack's world from opening. (UMP, 2026-11-13)
+        if (path.ends_with(".json") || path.ends_with(".mcmeta")) && bytes.starts_with(b"\xef\xbb\xbf") {
+            bytes.drain(..3);
         }
+        Some(bytes)
     }
 
     /// The `description` of `pack.mcmeta`, as text.
@@ -936,6 +977,20 @@ mod tests {
             Some("data_maps/mymod:item/fuel")
         );
         assert_eq!(content_id("data/mymod/data_maps/item/fuel.txt"), None);
+    }
+
+    #[test]
+    fn json_files_are_read_without_a_byte_order_mark() {
+        let root = std::env::temp_dir().join(format!("hz-datapack-bom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("data/m")).unwrap();
+        std::fs::write(root.join("data/m/a.json"), b"\xef\xbb\xbf{\"x\":1}").unwrap();
+        std::fs::write(root.join("data/m/b.nbt"), b"\xef\xbb\xbfraw").unwrap();
+        let pack = DataPack::folder("file/bom", &root);
+        let json = pack.read("data/m/a.json").unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&json).is_ok());
+        assert!(pack.read("data/m/b.nbt").unwrap().starts_with(b"\xef\xbb\xbf"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

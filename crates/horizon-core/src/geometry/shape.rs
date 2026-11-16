@@ -226,6 +226,11 @@ impl VoxelShape {
     pub fn same_identity(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.identity, &other.identity)
     }
+    /// A key equal for two shapes exactly when [`Self::same_identity`] holds, while both are
+    /// alive: for hashing shapes by identity.
+    pub fn identity_key(&self) -> usize {
+        Arc::as_ptr(&self.identity) as usize
+    }
     /// A separately constructed shape with the same immutable grid. Storage is
     /// shared, while identity-sensitive vanilla join shortcuts remain distinct.
     pub fn fresh_identity(&self) -> Self {

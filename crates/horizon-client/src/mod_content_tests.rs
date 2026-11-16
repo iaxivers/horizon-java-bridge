@@ -751,6 +751,41 @@ fn refuses_more_states_than_a_world_holds() {
 }
 
 #[test]
+fn leaves_out_the_biggest_mods_until_the_rest_fit() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-fit-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let small = ruby_mod(&scratch.join("ruby"));
+    // 810 redstone wires (1296 states each) pass 2^20 alone: that mod goes, the small one stays.
+    let mut big = ruby_mod(&scratch.join("wires"));
+    big.id = "wires".into();
+    let mut wire = big.content.blocks[0].clone();
+    wire.template = "minecraft:redstone_wire".into();
+    big.content.blocks.clear();
+    for i in 0..810 {
+        let mut b = wire.clone();
+        b.id = format!("wires:wire_{i}");
+        big.content.blocks.push(b);
+    }
+    let small_id = small.id.clone();
+    let mut mods = vec![small, big];
+    let (_, counts) = crate::mod_content::state_counts(&base, &mods).unwrap();
+    assert_eq!(counts.iter().find(|(id, _)| id == "wires").unwrap().1, 810 * 1296);
+    let out = crate::mod_content::fit_states(&base, &mut mods);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].0, "wires");
+    assert_eq!(mods.len(), 1);
+    assert_eq!(mods[0].id, small_id);
+    // What fits is left as it is.
+    let mut alone = mods;
+    assert!(crate::mod_content::fit_states(&base, &mut alone).is_empty());
+    assert_eq!(alone.len(), 1);
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+#[test]
 fn builds_past_sixteen_bit_states() {
     let Some(base) = prepared() else {
         return;

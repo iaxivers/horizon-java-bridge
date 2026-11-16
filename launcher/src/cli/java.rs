@@ -22,6 +22,11 @@ pub(super) enum JavaModsCmd {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// Download from Modrinth the mods the jars need and nobody added (also done at Play)
+    Deps {
+        #[arg(long)]
+        instance: Option<String>,
+    },
     /// What failed with the Java mods in the instance's last game (its log)
     Failed {
         #[arg(long)]
@@ -128,6 +133,23 @@ pub(super) fn java_mods(action: Option<JavaModsCmd>, as_json: bool) -> Result<()
                 json(mod_json(&added));
             } else {
                 println!("Added {} ({}).", added.title(), added.file);
+            }
+        }
+        JavaModsCmd::Deps { instance } => {
+            let dir = java_mods::dir(&home(&instance)?);
+            let report = horizon_launcher::java_deps::resolve(
+                &horizon_launcher::browser::modrinth::Modrinth,
+                &dir,
+                &|l| eprintln!("{l}"),
+            );
+            if as_json {
+                json(serde_json::json!({"added": report.added, "unresolved": report.unresolved}));
+            } else if report.added.is_empty() && report.unresolved.is_empty() {
+                println!("Every mod's required mods are there.");
+            } else {
+                for line in report.lines() {
+                    println!("{line}");
+                }
             }
         }
         JavaModsCmd::Remove { name, instance } => {

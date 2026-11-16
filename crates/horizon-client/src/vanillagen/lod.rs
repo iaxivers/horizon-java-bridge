@@ -72,7 +72,12 @@ impl Builder {
         // ticks and the frame leave, so more cores can share it: a third of
         // the threads, rounded up (a 4-thread machine's one thread left idle
         // time while the far trees and structures came in).
-        let count = horizon_threads::worker_count().div_ceil(3).clamp(1, 12);
+        // HORIZON_FAR_DECORATION_THREADS overrides it (A/B speed tests).
+        let count = std::env::var("HORIZON_FAR_DECORATION_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| horizon_threads::worker_count().div_ceil(3))
+            .clamp(1, 12);
         let threads = (0..count)
             .map(|_| Self::spawn(terrain.clone(), shared.clone(), tx.clone()))
             .collect();
@@ -113,6 +118,9 @@ impl Builder {
                     }
                 };
                 let mut state = generator.worker();
+                // Only what shows from afar: no ores, underground decoration or springs.
+                // HORIZON_FAR_DECORATION_FULL=1 keeps every step (A/B checks).
+                state.set_surface_only(std::env::var("HORIZON_FAR_DECORATION_FULL").as_deref() != Ok("1"));
                 loop {
                     let key = {
                         let mut requests = worker.requests.lock().unwrap();
@@ -273,6 +281,9 @@ fn columns(chunk: &ProtoChunk, biome_map: &[u16], dimension: &str) -> Arc<[Colum
     let max = min + height;
     let bottom = crate::chunk::ColumnLayout::of_level(min, height).min_y();
     let water = registry.default_state("minecraft:water");
+    // A snow layer draws as the snow block's top on the ground under it, as saved chunks'
+    // columns have it (`horizon_client::lod`): left out, far snowy land showed its grass.
+    let snow_block = registry.default_state("minecraft:snow_block");
     Arc::new(std::array::from_fn(|index| {
         let x = (index & 15) as i32;
         let z = (index >> 4) as i32;
@@ -281,6 +292,21 @@ fn columns(chunk: &ProtoChunk, biome_map: &[u16], dimension: &str) -> Arc<[Colum
             let mut state = chunk.block(x, y, z);
             let properties = states.get(state);
             let mut name = registry.state(state).map_or("", |s| s.name.as_str());
+            if name == "minecraft:snow" {
+                if let Some(snow) = snow_block
+                    && let Some(top) = column.spans.last_mut()
+                    && i32::from(top.max) == y
+                    && !states.get(top.state).has_fluid()
+                {
+                    top.state = snow;
+                    if let Some(surface) = column.surface.as_mut()
+                        && surface.height == y
+                    {
+                        surface.state = snow;
+                    }
+                }
+                continue;
+            }
             if properties.is_air()
                 || (!properties.blocks_motion_in_heightmap()
                     && !properties.has_fluid()
@@ -499,6 +525,7 @@ pub(super) struct VanillaLodSampler {
     worker: GeneratorWorker,
     builder: Option<Builder>,
     vegetation: Arc<Vegetation>,
+    snow: Arc<FarSnow>,
     islands: EndIslands,
     cache: FxHashMap<(i32, i32), Arc<[Column; 256]>>,
     order: VecDeque<(i32, i32)>,
@@ -516,11 +543,13 @@ impl VanillaLodSampler {
             generator.seed,
         ));
         let islands = EndIslands::new(generator.clone());
+        let snow = Arc::new(FarSnow::new(&generator));
         Self {
             generator,
             worker,
             builder,
             vegetation,
+            snow,
             islands,
             cache: FxHashMap::default(),
             order: VecDeque::new(),
@@ -536,6 +565,7 @@ impl LodSampler for VanillaLodSampler {
             worker: self.generator.generator.worker(),
             builder: None,
             vegetation: self.vegetation.clone(),
+            snow: self.snow.clone(),
             islands: self.islands.fork(),
             cache: FxHashMap::default(),
             order: VecDeque::new(),
@@ -684,6 +714,7 @@ impl VanillaLodSampler {
             fill_under_surface(&mut column, |state| states.get(state).has_fluid());
         }
         self.vegetation.apply(&mut column, x, z, width, light);
+        self.snow.apply(&mut column, x, z);
         self.islands.apply(&mut column, x, z, width, light);
         if !nether {
             shade_sky(
@@ -693,6 +724,76 @@ impl VanillaLodSampler {
             );
         }
         column
+    }
+}
+
+/// Snow on far land sampled straight from the generator, which has no decoration: the snow
+/// block's top where vanilla's `freeze_top_layer` would lay snow (the biome has precipitation
+/// and is cold enough at that height, `Biome.coldEnoughToSnow`), on land, not water. Without
+/// it far snowy plains and peaks showed their grass. (UMP, 2026-11-13)
+pub(super) struct FarSnow {
+    /// By the client's biome index: the biome's climate, when it can snow at all.
+    climates: FxHashMap<u16, horizon_world::worldgen::biome_temperature::BiomeTemperatureSettings>,
+    snow: Option<BlockStateId>,
+    sea_level: i32,
+}
+impl FarSnow {
+    fn new(generator: &VanillaTerrain) -> Self {
+        let data = generator.generator.data();
+        let mut climates = FxHashMap::default();
+        for (index, &biome) in generator.biome_map.iter().enumerate() {
+            let json = data.biome_json(horizon_world::worldgen::biome::BiomeId(index as u32));
+            if let Ok(climate) =
+                horizon_world::worldgen::biome_temperature::BiomeTemperatureSettings::from_json(json)
+                && climate.has_precipitation
+            {
+                climates.insert(biome, climate);
+            }
+        }
+        Self {
+            climates,
+            snow: data.registry().default_state("minecraft:snow_block"),
+            sea_level: generator.generator.sea_level(),
+        }
+    }
+    fn apply(&self, column: &mut Column, x: i32, z: i32) {
+        let (Some(snow), Some(surface)) = (self.snow, column.surface) else {
+            return;
+        };
+        if surface.water.is_some_and(|(y, _)| y >= surface.height) {
+            return;
+        }
+        let Some(climate) = self.climates.get(&surface.biome) else {
+            return;
+        };
+        let at = horizon_core::position::BlockPos::new(x, surface.height, z);
+        if climate.height_adjusted(at, self.sea_level) >= 0.15 {
+            return;
+        }
+        // The top run's top block is snow (the layer over it, seen from afar); a canopy over
+        // the ground keeps its leaves (vanilla lays its snow on them too, but leaves stay
+        // leaves under it).
+        let Some(top) = column.spans.last_mut() else {
+            return;
+        };
+        if i32::from(top.max) != surface.height {
+            return;
+        }
+        if top.max - top.min > 1 {
+            top.max -= 1;
+            let under = *top;
+            column.push(Span {
+                min: under.max,
+                max: under.max + 1,
+                state: snow,
+                ..under
+            });
+        } else {
+            top.state = snow;
+        }
+        if let Some(surface) = column.surface.as_mut() {
+            surface.state = snow;
+        }
     }
 }
 
@@ -1128,6 +1229,104 @@ mod tests {
     }
     /// Small End islands are decoration over the void, so the direct sampler
     /// has to estimate them from `end_island_decorated`.
+    /// Far tree cover against the real world: how many columns carry leaves on top in real
+    /// decorated chunks, and in the far estimate of the same columns (cells of 1 and 4). Prints the
+    /// share per biome; the estimate must stay within reach of the real cover. (UMP, 2026-11-15:
+    /// the user saw far land drawn with many more trees than the world has.)
+    #[test]
+    #[ignore = "requires prepared worldgen data in HORIZON_TEST_RESOURCES"]
+    fn far_tree_cover_follows_real_chunks() -> crate::Result<()> {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("HORIZON_TEST_RESOURCES").expect("resources"),
+        );
+        let assets = crate::assets::Assets::load(&root)?;
+        let biomes = crate::biome::Biomes::load(&root)?;
+        let terrain = Arc::new(VanillaTerrain::new(
+            &root.join("worldgen"),
+            assets.registry,
+            &biomes,
+            1234,
+        )?);
+        let mut sampler = VanillaLodSampler::new(terrain.clone());
+        let is_tree = |state: BlockStateId| {
+            let name = &assets.registry.state(state).unwrap().name;
+            name.ends_with("_leaves") || name.ends_with("_log")
+        };
+        // Real decorated chunks in a 12x12 chunk area, from the decoration worker.
+        // 6x6 chunks in each of nine areas a few kilometres apart (many biomes).
+        let keys: Vec<(i32, i32)> = [(-70, 3), (40, -120), (150, 60), (-200, -40), (90, 200), (-120, 160), (250, -200), (-260, 220), (10, 10), (-66, 0), (-75, 8), (-300, 300), (320, 40), (-20, -300), (180, -320)]
+            .iter()
+            .flat_map(|&(ax, az)| (0..6).flat_map(move |z| (0..6).map(move |x| (ax + x, az + z))))
+            .collect();
+        sampler.request_detail(&keys, [0, 0]);
+        let mut real = std::collections::HashMap::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while real.len() < keys.len() {
+            for (key, columns) in sampler.drain_details() {
+                real.insert(key, columns);
+            }
+            assert!(std::time::Instant::now() < deadline, "decoration worker stalled");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Per biome: (columns, real tree tops, estimated tree tops at width 1, at width 4, real at
+        // 16 reduced, estimated at 16).
+        let mut by_biome: std::collections::BTreeMap<String, [u32; 6]> = Default::default();
+        let mut fresh = VanillaLodSampler::new(terrain.clone());
+        for (&(cx, cz), columns) in &real {
+            for i in 0..256 {
+                let (x, z) = (cx * 16 + (i & 15) as i32, cz * 16 + (i >> 4) as i32);
+                let column = &columns[i];
+                let Some(surface) = column.surface else { continue };
+                let name = biomes.get(surface.biome).name.to_string();
+                let entry = by_biome.entry(name).or_default();
+                entry[0] += 1;
+                entry[1] += u32::from(column.spans.last().is_some_and(|s| is_tree(s.state)));
+                // The estimate of the same column, sampled straight from the generator.
+                let one = fresh.grid(x, z, 1, 1).pop().unwrap_or_default();
+                entry[2] += u32::from(one.spans.last().is_some_and(|s| is_tree(s.state)));
+                if (x & 3) == 0 && (z & 3) == 0 {
+                    let four = fresh.grid(x, z, 4, 1).pop().unwrap_or_default();
+                    entry[3] += 16 * u32::from(four.spans.last().is_some_and(|s| is_tree(s.state)));
+                }
+                if i == 0 {
+                    // The chunk as one 16-block cell: real chunk reduced, and the estimate.
+                    let reduced = Column::reduced(columns, 0, 0, 16);
+                    entry[4] += 256 * u32::from(reduced.spans.last().is_some_and(|s| is_tree(s.state)));
+                    let wide = fresh.grid(x, z, 16, 1).pop().unwrap_or_default();
+                    entry[5] += 256 * u32::from(wide.spans.last().is_some_and(|s| is_tree(s.state)));
+                }
+            }
+        }
+        let mut total = [0u32; 6];
+        for (biome, n) in &by_biome {
+            if n[0] < 256 {
+                continue;
+            }
+            let pct = |v: u32| v as f64 * 100.0 / n[0] as f64;
+            println!(
+                "{biome}: {} columns, real trees {:.0}%, far (1) {:.0}%, far (4) {:.0}%, 16-cells real {:.0}% far {:.0}%",
+                n[0], pct(n[1]), pct(n[2]), pct(n[3]), pct(n[4]), pct(n[5])
+            );
+            for k in 0..6 {
+                total[k] += n[k];
+            }
+        }
+        let pct = |v: u32| v as f64 * 100.0 / total[0].max(1) as f64;
+        println!(
+            "all: real trees {:.0}%, far (1) {:.0}%, far (4) {:.0}%, 16-cells real {:.0}% far {:.0}%",
+            pct(total[1]), pct(total[2]), pct(total[3]), pct(total[4]), pct(total[5])
+        );
+        // Forest cells drawn as trees about as often as real forest chunks reduce to trees
+        // (they were 73% to 37%: far forests one solid sheet).
+        let forest = by_biome.get("minecraft:forest").expect("the sampled areas hold forest");
+        let (real16, far16) = (forest[4] as f64 / forest[0] as f64, forest[5] as f64 / forest[0] as f64);
+        assert!(
+            (far16 - real16).abs() <= 0.15,
+            "16-wide forest cells: real {real16:.2}, far {far16:.2}"
+        );
+        Ok(())
+    }
+
     #[test]
     #[ignore = "requires prepared worldgen data in HORIZON_TEST_RESOURCES"]
     fn end_small_islands_are_estimated_over_the_void() -> crate::Result<()> {

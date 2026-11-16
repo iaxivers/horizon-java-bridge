@@ -998,6 +998,9 @@ public final class HorizonHooks {
         if (handlers.isEmpty()) return Result.NONE;
         // One callback for the call, as Mixin gives the method's injections: a cancel ends it.
         CallbackInfo info = null;
+        // MixinExtras' @Share/@Local refs: one per type for the call, as the method's own frame
+        // would give every handler that shares it (XaeroPlus' seenChunkRef was null).
+        Map<Class<?>, Object> refs = new HashMap<>();
         for (Method handler : handlers) {
             if (skipFabric && handler.getAnnotation(MixinMerged.class).mixin().startsWith("net.fabricmc.")) continue;
             Class<?>[] params = handler.getParameterTypes();
@@ -1018,6 +1021,7 @@ public final class HorizonHooks {
                     }
                 }
                 if (call[i] == null && params[i].isPrimitive()) call[i] = zero(params[i]);
+                if (call[i] == null) call[i] = sugarRef(params[i], refs);
             }
             try {
                 handler.invoke(Modifier.isStatic(handler.getModifiers()) ? null : self, call);
@@ -1077,10 +1081,13 @@ public final class HorizonHooks {
         CallbackInfo info = desc.endsWith(")V")
                 ? new CallbackInfo(method, true)
                 : new CallbackInfoReturnable<>(method, true, returnValue);
+        Map<Class<?>, Object> refs = new HashMap<>();
         for (Method handler : handlers) {
             Object[] call = new Object[args.length + 1];
             System.arraycopy(args, 0, call, 0, args.length);
             call[args.length] = info;
+            Class<?>[] shape = handler.getParameterTypes();
+            for (int i = 0; i < args.length && i < shape.length; i++) if (call[i] == null) call[i] = sugarRef(shape[i], refs);
             try {
                 handler.invoke(Modifier.isStatic(handler.getModifiers()) ? null : self, call);
             } catch (Throwable t) {
@@ -1454,8 +1461,26 @@ public final class HorizonHooks {
         return null;
     }
 
+    /** Whether a handler's parameters (CallbackInfo last) are more than the CallbackInfo and match no overload of {@code method}. */
+    private static boolean takesLocals(Class<?> owner, String method, Class<?>[] params) {
+        int ci = -1;
+        for (int i = 0; i < params.length; i++) if (CallbackInfo.class.isAssignableFrom(params[i])) { ci = i; break; }
+        if (ci <= 0) return ci < 0;
+        Class<?>[] head = java.util.Arrays.copyOf(params, ci);
+        java.util.List<Class<?>[]> overloads = new java.util.ArrayList<>();
+        if (method.equals("<init>")) for (var c : owner.getDeclaredConstructors()) overloads.add(c.getParameterTypes());
+        else for (var mm : owner.getDeclaredMethods()) if (mm.getName().equals(method)) overloads.add(mm.getParameterTypes());
+        for (Class<?>[] o : overloads) if (java.util.Arrays.equals(o, head)) return params.length - 1 > ci;
+        return true;
+    }
+
     private static Object argument(Class<?> owner, Object self, Class<?> type, java.lang.reflect.Type generic) {
         if (type.isPrimitive()) return zero(type);
+        // A level's world storage (ServerLevel's constructor: BCLib reads its level id): the
+        // bridge's own, beside Horizon's world (HorizonWorldgen.levelStorage). (UMP, 2026-11-11)
+        if (type == net.minecraft.world.level.storage.LevelStorageSource.LevelStorageAccess.class) {
+            return HorizonWorldgen.levelStorage();
+        }
         // A level's stem (ServerLevel's constructor: its generator, which BCLib's and BetterEnd's
         // handlers read), from the registries by the level's dimension.
         if (type == net.minecraft.world.level.dimension.LevelStem.class && self instanceof net.minecraft.world.level.Level level) {
@@ -1488,6 +1513,34 @@ public final class HorizonHooks {
             }
         }
         return null;
+    }
+
+    /**
+     * A MixinExtras reference (LocalRef, LocalBooleanRef, LocalIntRef...: @Share and @Local by
+     * reference) for a handler parameter of that type, shared by the call's handlers; null for
+     * any other type. Horizon runs no vanilla frame to take locals from, so it holds the type's
+     * default, as a fresh @Share does.
+     */
+    private static Object sugarRef(Class<?> type, Map<Class<?>, Object> refs) {
+        if (!type.isInterface() || !type.getName().startsWith("com.llamalad7.mixinextras.sugar.ref.")) return null;
+        // MixinExtras generates its implementations at run time; these are plain interfaces
+        // (get, set, getAndSet...), so a holder answers them: the type's default to start.
+        return refs.computeIfAbsent(type, t -> {
+            Class<?> held = null;
+            for (Method m : t.getMethods()) if (m.getName().equals("get") && m.getParameterCount() == 0) held = m.getReturnType();
+            final Object[] value = {held != null && held.isPrimitive() ? zero(held) : null};
+            return java.lang.reflect.Proxy.newProxyInstance(t.getClassLoader(), new Class<?>[] {t}, (proxy, m, a) -> {
+                switch (m.getName()) {
+                    case "get": return value[0];
+                    case "set": value[0] = a[0]; return null;
+                    case "getAndSet": { Object old = value[0]; value[0] = a[0]; return old; }
+                    case "toString": return "ref(" + value[0] + ")";
+                    case "hashCode": return System.identityHashCode(proxy);
+                    case "equals": return proxy == a[0];
+                    default: return m.getReturnType().isPrimitive() && m.getReturnType() != void.class ? zero(m.getReturnType()) : null;
+                }
+            });
+        });
     }
 
     private static Object zero(Class<?> type) {
@@ -1549,6 +1602,11 @@ public final class HorizonHooks {
                 // The method's arguments, then the CallbackInfo; locals captured after it can't
                 // be given (no vanilla frame runs), so such a handler is left out.
                 if (params.length != arguments + 1 || !CallbackInfo.class.isAssignableFrom(params[arguments])) {
+                    // A handler shaped for another of the target's calls (only the CallbackInfo, or
+                    // exactly an overload's parameters) is the other fire's: Horizon fires both
+                    // shapes (MinecraftServer.<init>), so it runs there and isn't a gap. Only one
+                    // that takes more than any overload (captured locals) is said. (UMP, 2026-11-11)
+                    if (!takesLocals(owner, method, params)) continue;
                     if (FAILURES.merge("shape " + m, 1, Integer::sum) == 1) {
                         Natives.log("Mixin census: " + h.mod() + "'s " + h.handler() + " at " + at + " of "
                                 + owner.getSimpleName() + "." + method + " takes locals; Horizon can't give them");

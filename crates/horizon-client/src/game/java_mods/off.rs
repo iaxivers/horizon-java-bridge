@@ -21,6 +21,8 @@ pub(in crate::game) fn java_creative(_out: &Path) {}
 pub(in crate::game) fn level_named(id: &str) -> Dim {
     Dim::from_id(id)
 }
+/// The Java mods' client at the title: there is none.
+pub(in crate::game) fn client_start_at_title() {}
 /// Whether Java mods run: never.
 pub(in crate::game) fn has_java_mods() -> bool {
     false

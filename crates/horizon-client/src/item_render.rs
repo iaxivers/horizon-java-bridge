@@ -678,27 +678,59 @@ fn load_definitions(root: &Path) -> BTreeMap<String, ClientItem> {
     let Ok(namespaces) = fs::read_dir(root.join("assets")) else {
         return out;
     };
-    for ns in namespaces.flatten() {
-        let Ok(folder) = horizon_world::json_folder::read(&ns.path().join("items")) else {
-            continue;
-        };
+    // Every namespace's folder read and parsed at once: a modded pack has hundreds, each read
+    // in turn took tens of seconds of a start. Inserted in the same order. (UMP, 2026-11-14)
+    let namespaces: Vec<_> = namespaces.flatten().collect();
+    let parsed = par_map(&namespaces, |ns| {
+        let folder = horizon_world::json_folder::read(&ns.path().join("items")).ok()?;
         let namespace = ns.file_name().to_string_lossy().into_owned();
-        for file in &folder.files {
-            let Some(text) = file.bytes().ok().and_then(|b| std::str::from_utf8(b).ok()) else {
-                continue;
-            };
-            match ClientItem::from_json(text) {
+        let items: Vec<(String, Result<ClientItem, String>)> = folder
+            .files
+            .iter()
+            .filter_map(|file| {
+                let text = file.bytes().ok().and_then(|b| std::str::from_utf8(b).ok())?;
+                Some((file.name.clone(), ClientItem::from_json(text).map_err(|e| e.to_string())))
+            })
+            .collect();
+        Some((namespace, items))
+    });
+    for (namespace, items) in parsed.into_iter().flatten() {
+        for (name, item) in items {
+            match item {
                 Ok(item) => {
-                    out.insert(format!("{namespace}:{}", file.name), item);
+                    out.insert(format!("{namespace}:{name}"), item);
                 }
-                Err(e) => log::warn!(
-                    "Horizon: item definition {namespace}:{} not loaded: {e}",
-                    file.name
-                ),
+                Err(e) => log::warn!("Horizon: item definition {namespace}:{name} not loaded: {e}"),
             }
         }
     }
     out
+}
+
+/// `f` over `items` on several threads, results in order.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<R>>> = items.iter().map(|_| Mutex::new(None)).collect();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 12);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(item) = items.get(i) else {
+                    return;
+                };
+                *slots[i].lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(f(item));
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|s| {
+            s.into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .expect("every item mapped")
+        })
+        .collect()
 }
 
 fn glint_padding(filtering: i32, bit: i32) -> usize {

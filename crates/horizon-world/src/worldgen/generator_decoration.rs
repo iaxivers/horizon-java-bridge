@@ -326,6 +326,11 @@ impl Decoration {
             })
             .clone()
     }
+    /// Whether a feature's step shows on the surface (`WorkerState::surface_only`): all but
+    /// strongholds, underground ores, underground decoration and fluid springs.
+    fn surface_feature(&self, id: FeatureIdentity) -> bool {
+        !matches!(self.plan.seed(id).map(|(_index, step)| step), Some(5..=8))
+    }
     /// Vanilla's feature identity and the step-local index/step mixed into
     /// `set_feature_seed`.
     pub(super) fn seed(&self, name: &str) -> Option<(u32, i32, i32)> {
@@ -437,6 +442,7 @@ impl Decoration {
             Err(e) => return Err(resource(e.to_string())),
         };
         let structures_only = worker.structures_only;
+        let surface_only = worker.surface_only;
         let references = region[4].structure_starts.clone();
         let mut block_entities = Vec::new();
         for chunk in region.iter_mut() {
@@ -527,6 +533,9 @@ impl Decoration {
             },
             |world, placer, random, id, origin| {
                 if structures_only {
+                    return Ok(false);
+                }
+                if surface_only && !self.surface_feature(id) {
                     return Ok(false);
                 }
                 let Ok(feature) = &self.features[id.0 as usize] else {

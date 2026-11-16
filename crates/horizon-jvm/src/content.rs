@@ -169,6 +169,12 @@ pub fn build(
         Err(e) => log(format!("Java mods' content: no block tints: {e}")),
     }
     let _ = std::fs::remove_dir_all(&instance);
+    // The build's own inputs: only the carried folders are read back (`cached`). The oracle
+    // facts were 1.2 GB with 184 mods, the files no mod could claim another 50 MB.
+    let _ = std::fs::remove_dir_all(work.join("oracle"));
+    for dir in std::fs::read_dir(work.join("mods")).into_iter().flatten().flatten() {
+        let _ = std::fs::remove_dir_all(dir.path().join("outside"));
+    }
     std::fs::write(cache.join("stamp"), stamp(jars)).map_err(|e| format!("stamp: {e}"))?;
     Ok(carried(&work))
 }

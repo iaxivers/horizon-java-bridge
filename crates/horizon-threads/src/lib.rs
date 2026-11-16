@@ -26,9 +26,26 @@ use std::sync::{
 pub fn worker_count() -> usize {
     static COUNT: OnceLock<usize> = OnceLock::new();
     *COUNT.get_or_init(|| {
-        parse_worker_count(std::env::var("HORIZON_WORKER_THREADS").ok())
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+        parse_worker_count(std::env::var("HORIZON_WORKER_THREADS").ok()).unwrap_or_else(|| {
+            let machine = std::thread::available_parallelism().map_or(1, |n| n.get());
+            machine.saturating_sub(SPARED.load(Ordering::Relaxed)).max(1)
+        })
     })
+}
+
+/// Cores the worker pools leave free (`spare_cores`).
+static SPARED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Before any pool starts: the worker pools leave `cores` of the machine's free (on one of 8
+/// or more), for the threads a frame and a tick wait on. With Java mods, whose world generation
+/// runs on the workers and the mods' own threads beside them, every core stayed busy while new
+/// land generated and the render thread waited for one: UMP's 300-mod flight, 4 runs, 1% low
+/// 42-46 fps with all 12 cores' workers, 65-69 with 10; averages and far terrain's fill the
+/// same. A count `HORIZON_WORKER_THREADS` sets wins. (UMP, 2026-11-13)
+pub fn spare_cores(cores: usize) {
+    if std::thread::available_parallelism().map_or(1, |n| n.get()) >= 8 {
+        SPARED.store(cores, Ordering::Relaxed);
+    }
 }
 
 /// `Some(n)` when `value` names a positive count (`" 4 "` counts; `"0"`,

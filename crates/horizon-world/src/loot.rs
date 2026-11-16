@@ -533,9 +533,25 @@ pub fn shared_tables(root: &Path, overlay: &PackOverlay) -> io::Result<Arc<LootT
             .map(|e| e.path())
             .collect();
         namespaces.sort();
-        for namespace in namespaces {
-            hash_files(&namespace.join("loot_table"), &mut hasher);
-        }
+        // Each namespace's files stat'ed at once, hashed in order.
+        let hashes: Vec<u64> = std::thread::scope(|scope| {
+            let jobs: Vec<_> = namespaces
+                .chunks(namespaces.len().div_ceil(8).max(1))
+                .map(|part| {
+                    scope.spawn(move || {
+                        part.iter()
+                            .map(|namespace| {
+                                let mut h = DefaultHasher::new();
+                                hash_files(&namespace.join("loot_table"), &mut h);
+                                h.finish()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            jobs.into_iter().flat_map(|j| j.join().unwrap_or_default()).collect()
+        });
+        hashes.hash(&mut hasher);
         overlay
             .kind("loot_table")
             .for_each(|file| file.hash(&mut hasher));
@@ -600,8 +616,30 @@ fn load_kind(data: &Path, kind: &str, out: &mut HashMap<String, Value>) -> io::R
         .filter_map(|e| e.file_name().to_str().map(str::to_owned))
         .collect();
     namespaces.sort();
-    for ns in namespaces {
-        load_dir(&data.join(&ns).join(kind), &ns, "", out)?;
+    // Every namespace read and parsed at once: hundreds with mods, tens of thousands of loot
+    // tables; one at a time this took most of a minute of each start. Inserted in the same
+    // order, so a later namespace's id still wins. (UMP, 2026-11-14)
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<io::Result<HashMap<String, Value>>>>> =
+        namespaces.iter().map(|_| Mutex::new(None)).collect();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 12);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(ns) = namespaces.get(i) else {
+                    return;
+                };
+                let mut part = HashMap::new();
+                let read = load_dir(&data.join(ns).join(kind), ns, "", &mut part).map(|()| part);
+                *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(read);
+            });
+        }
+    });
+    for slot in slots {
+        if let Some(part) = slot.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            out.extend(part?);
+        }
     }
     Ok(())
 }

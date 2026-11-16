@@ -330,11 +330,24 @@ public final class HorizonClientBlockEntities {
         }
     }
 
+    /**
+     * Block entities whose update failed to load, said once each: one that fails does so every tick it
+     * changes (a mod's block entity reading a client part Horizon's client lacks), and said each time it
+     * wrote 900 lines a second, 100 MB of log in minutes, with its formatting the game's time. (UMP, 2026-11-12)
+     */
+    private static final java.util.Set<BlockEntity> FAILED_LOADS =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
     private static void load(ClientLevel level, BlockEntity be, CompoundTag tag) {
         try {
             be.loadWithComponents(TagValueInput.create(ProblemReporter.DISCARDING, level.registryAccess(), tag));
+            FAILED_LOADS.remove(be);
         } catch (Throwable t) {
-            Natives.log("Horizon's client: the client's block entity at " + be.getBlockPos() + " couldn't load its update: " + t);
+            if (FAILED_LOADS.add(be)) {
+                Natives.log("Horizon's client: the client's block entity at " + be.getBlockPos() + " ("
+                        + net.minecraft.core.registries.BuiltInRegistries.BLOCK_ENTITY_TYPE.getKey(be.getType())
+                        + ") couldn't load its update (said once): " + t);
+            }
         }
     }
 }

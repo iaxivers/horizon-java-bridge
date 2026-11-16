@@ -183,17 +183,39 @@ impl Tree {
         // One JSON per id, the packs' over the game's own. Through `json_folder`: from
         // the prepared data file, and read once while a load holds the folder.
         let mut json: BTreeMap<String, Value> = BTreeMap::new();
-        for ns in namespaces.flatten() {
-            let Ok(folder) = horizon_world::json_folder::read(&ns.path().join("advancement"))
-            else {
-                continue;
-            };
-            let ns = ns.file_name().to_string_lossy().into_owned();
-            for file in &folder.files {
-                if let Ok(v) = serde_json::from_slice::<Value>(file.bytes().unwrap_or_default()) {
-                    json.insert(format!("{ns}:{}", file.name), v);
-                }
+        // Every namespace read and parsed at once: hundreds with mods, each in turn took tens of
+        // seconds of a start. Inserted in the same order. (UMP, 2026-11-14)
+        let namespaces: Vec<_> = namespaces.flatten().collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<std::sync::Mutex<Vec<(String, Value)>>> =
+            namespaces.iter().map(|_| std::sync::Mutex::new(Vec::new())).collect();
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 12);
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(ns) = namespaces.get(i) else {
+                        return;
+                    };
+                    let Ok(folder) = horizon_world::json_folder::read(&ns.path().join("advancement"))
+                    else {
+                        continue;
+                    };
+                    let name = ns.file_name().to_string_lossy().into_owned();
+                    let parsed: Vec<(String, Value)> = folder
+                        .files
+                        .iter()
+                        .filter_map(|file| {
+                            let v = serde_json::from_slice::<Value>(file.bytes().unwrap_or_default()).ok()?;
+                            Some((format!("{name}:{}", file.name), v))
+                        })
+                        .collect();
+                    *slots[i].lock().unwrap_or_else(std::sync::PoisonError::into_inner) = parsed;
+                });
             }
+        });
+        for slot in slots {
+            json.extend(slot.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner));
         }
         for (id, files) in overlay.kind("advancement") {
             match serde_json::from_slice::<Value>(horizon_world::loot::PackOverlay::top(files)) {

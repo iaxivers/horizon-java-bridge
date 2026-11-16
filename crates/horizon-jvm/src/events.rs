@@ -2349,6 +2349,16 @@ pub fn functions_ready() -> bool {
     .unwrap_or(true)
 }
 
+/// The headless client's first frame (its resource reload, CLIENT_STARTED) now, on a thread of
+/// its own, while the player is idle at the title: `HorizonServer.clientStartAtTitle`. Java runs
+/// it once.
+pub fn client_start_at_title() {
+    let _ = with_server(|env, class| {
+        env.call_static_method(class, "clientStartAtTitle", "()V", &[])?;
+        Ok(())
+    });
+}
+
 /// Whether the Java mods' client reads its network connection's packets (a mod hooks how a
 /// client's `Connection` reads them: ReplayMod, Flashback): `HorizonPacketTap.wanted`. Then
 /// the game keeps what the server sends the window's own player and passes it each tick
@@ -2610,6 +2620,32 @@ pub fn worldgen_lod_materials(dimension: &str) -> Result<Option<Vec<String>>, St
         string_array(env, names).map(Some)
     })?;
     Ok(names.flatten())
+}
+
+/// Each biome's tree leaves, `(biome, state)` (`HorizonWorldgen.lodFoliage`): far canopies
+/// in the mods' biomes. None if the mods don't generate the dimension.
+pub fn worldgen_lod_foliage(dimension: &str) -> Result<Option<Vec<(String, String)>>, String> {
+    let pairs = with_server(|env, class| {
+        let dimension = env.new_string(dimension)?;
+        let pairs = env
+            .call_static_method(
+                class,
+                "worldgenLodFoliage",
+                "(Ljava/lang/String;)[Ljava/lang/String;",
+                &[JValue::Object(&dimension)],
+            )?
+            .l()?;
+        if pairs.is_null() {
+            return Ok(None);
+        }
+        string_array(env, pairs).map(Some)
+    })?;
+    Ok(pairs.flatten().map(|pairs| {
+        pairs
+            .into_iter()
+            .filter_map(|p| p.split_once('=').map(|(b, s)| (b.to_string(), s.to_string())))
+            .collect()
+    }))
 }
 
 /// Far columns of a dimension a mod's own generator makes (`HorizonWorldgen.lodColumns`:

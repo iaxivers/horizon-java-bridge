@@ -248,11 +248,31 @@ fn hash_file(hasher: &mut Sha256, root: &Path, path: &Path) -> io::Result<()> {
         .strip_prefix(root)
         .map_err(|e| invalid(e.to_string()))?;
     hash_str(hasher, &relative.to_string_lossy());
+    // Files over STAMP_OVER are keyed by their length and modification time, not their bytes:
+    // reading and hashing gameplay-facts.json (3.3 GB with 184 mods) to check the snapshot cost
+    // more than the snapshot saved (UMP startup trace: rest.behaviours 11 s). The content root
+    // is rewritten whole when its mods change, so a changed file has a new time.
+    // (UMP, 2026-11-15)
+    let meta = fs::metadata(path)?;
+    if meta.len() > STAMP_OVER {
+        hasher.update(b"stamp");
+        hasher.update(meta.len().to_le_bytes());
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos());
+        hasher.update(modified.to_le_bytes());
+        return Ok(());
+    }
     let bytes = fs::read(path)?;
     hasher.update((bytes.len() as u64).to_le_bytes());
     hasher.update(hash_contents(&bytes));
     Ok(())
 }
+
+/// Files bigger than this key the snapshot by length and time ([`hash_file`]).
+const STAMP_OVER: u64 = 64 << 20;
 
 /// A content hash's piece: files bigger than this hash piece by piece across
 /// the idle cores — one SHA-256 stream over tens of megabytes is the

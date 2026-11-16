@@ -723,5 +723,12 @@ pub(super) fn ensure_at_play(java_build: bool, tag: &str, tx: &Sender<Msg>) -> R
     let log = |line: &str| {
         let _ = tx.send(Msg::Line(Job::Client, line.to_string()));
     };
-    java_variant::ensure_with(tag, &progress, &log)
+    java_variant::ensure_with(tag, &progress, &log)?;
+    // Plug and play: the mods the jars need and nobody added come from Modrinth first.
+    let dir = java_mods::dir(&horizon_launcher::instances::selected().home);
+    let report = horizon_launcher::java_deps::resolve(&horizon_launcher::browser::modrinth::Modrinth, &dir, &log);
+    for line in report.lines() {
+        log(&line);
+    }
+    Ok(())
 }

@@ -130,7 +130,60 @@ public final class HorizonDeviceMods {
         }
     }
 
+    /**
+     * The scan's result kept on disk by the set of mods (their ids, versions and jar sizes and
+     * times): reading every class of every mod (182 jars, ~20 s) on each start ran on the main
+     * thread when the first mod handler asked before the background scan ended. (UMP, 2026-11-14)
+     */
+    private static Path cacheFile() {
+        StringBuilder key = new StringBuilder("v1");
+        var all = new java.util.ArrayList<>(FabricLoader.getInstance().getAllMods());
+        all.sort(java.util.Comparator.comparing(m -> m.getMetadata().getId()));
+        for (var mod : all) {
+            key.append('|').append(mod.getMetadata().getId()).append(' ').append(mod.getMetadata().getVersion().getFriendlyString());
+            for (Path p : mod.getOrigin().getKind() == net.fabricmc.loader.api.metadata.ModOrigin.Kind.PATH
+                    ? mod.getOrigin().getPaths() : java.util.List.<Path>of()) {
+                try {
+                    key.append(' ').append(Files.size(p)).append(' ').append(Files.getLastModifiedTime(p).toMillis());
+                } catch (java.io.IOException | UnsupportedOperationException e) {
+                    // a folder or a nested jar: its id and version stand for it
+                }
+            }
+        }
+        String hash = Integer.toHexString(key.toString().hashCode()) + Integer.toHexString(key.length());
+        return FabricLoader.getInstance().getGameDir().resolve(".horizon-cache").resolve("device-mods-" + hash + ".txt");
+    }
+
     private static Set<String> scanNow() {
+        Path cache = null;
+        try {
+            cache = cacheFile();
+            if (Files.isRegularFile(cache)) {
+                Set<String> read = new TreeSet<>();
+                for (String line : Files.readAllLines(cache, StandardCharsets.UTF_8)) {
+                    if (!line.isBlank()) read.add(line.trim());
+                }
+                return java.util.Collections.unmodifiableSet(read);
+            }
+        } catch (Throwable t) {
+            cache = null;
+        }
+        Set<String> found = scanJars();
+        if (cache != null) {
+            try {
+                Files.createDirectories(cache.getParent());
+                try (var old = Files.newDirectoryStream(cache.getParent(), "device-mods-*.txt")) {
+                    for (Path p : old) Files.deleteIfExists(p);
+                }
+                Files.write(cache, found, StandardCharsets.UTF_8);
+            } catch (Throwable t) {
+                // only costs the next start the scan
+            }
+        }
+        return found;
+    }
+
+    private static Set<String> scanJars() {
         Set<String> out = new TreeSet<>();
         byte[][] needles = new byte[DEVICE_CALLS.length][];
         for (int i = 0; i < needles.length; i++) needles[i] = DEVICE_CALLS[i].getBytes(StandardCharsets.UTF_8);

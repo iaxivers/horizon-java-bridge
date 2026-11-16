@@ -2817,7 +2817,9 @@ impl Ranges<'_> {
         // A forced chunk is as near as the player's own (vanilla's FORCED ticket is level
         // 31, the player's chunk's), and so is the work around it: data packs forceload a
         // chunk far away and use it at once (Skyblock Infinite's island at 0 0).
-        for f in self.forced {
+        // The Java mods' tickets too (a data pack's forceload through their server: the chunk
+        // waited behind the whole spawn area, ~6 s of a 184-mod join). (UMP, 2026-11-14)
+        for f in self.forced.iter().chain(self.mod_forced.iter()) {
             let (dx, dz) = (i64::from(x - f.0), i64::from(z - f.1));
             own = own.min(dx * dx + dz * dz);
         }

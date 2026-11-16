@@ -167,6 +167,31 @@ pub fn runs_on(wants: &serde_json::Value, version: &str) -> Option<bool> {
     }
 }
 
+/// Two pre-release parts as SemVer (and Fabric's SemanticVersionImpl) compare them: part by
+/// part on the dots, numbers as numbers (`6.0.10` after `6.0.9`: JourneyMap `26.3-6.0.10` meets
+/// MapFrontiers' `>=26.3-6.0.9`), a number before a word, words as text, fewer parts first.
+fn pre_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let (mut x, mut y) = (a.split('.'), b.split('.'));
+    loop {
+        match (x.next(), y.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(p), Some(q)) => {
+                let o = match (p.parse::<u64>(), q.parse::<u64>()) {
+                    (Ok(m), Ok(n)) => m.cmp(&n),
+                    (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                    (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                    (Err(_), Err(_)) => p.cmp(q),
+                };
+                if o.is_ne() {
+                    return o;
+                }
+            }
+        }
+    }
+}
+
 /// A version as Fabric compares them: numbers, then a pre-release (`-rc.1`) before the release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Version {
@@ -198,7 +223,7 @@ impl Version {
                 (None, None) => std::cmp::Ordering::Equal,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (Some(_), None) => std::cmp::Ordering::Less,
-                (Some(a), Some(b)) => a.cmp(b),
+                (Some(a), Some(b)) => pre_cmp(a, b),
             })
     }
 
@@ -384,6 +409,24 @@ fn failures_in(log: &str) -> Vec<Failure> {
                 name: Some(name.trim().to_string()),
                 text: rest.trim().to_string(),
             }
+        } else if let Some(rest) = message
+            .strip_prefix("Java mods: ")
+            .filter(|r| r.contains(" isn't needed in Horizon"))
+        {
+            // Left out on purpose (a renderer or performance mod: Horizon is the engine): said, not an error.
+            Failure {
+                name: rest.split(" isn't needed in Horizon").next().map(|n| n.trim().to_string()),
+                text: rest.trim().to_string(),
+            }
+        } else if let Some(rest) = message
+            .strip_prefix("Java mods: ")
+            .filter(|r| r.contains(" can't be read (left out)"))
+        {
+            // One mod's broken recipe or advancement (data made for another mod's version): left out.
+            Failure {
+                name: rest.split("'s ").next().map(|n| n.trim().to_string()),
+                text: rest.split(": ").next().unwrap_or(rest).trim().to_string(),
+            }
         } else if message.starts_with("Java mods: not started")
             || message.starts_with("Java mods: Fabric can't start")
             || message.contains("Incompatible mods found")
@@ -422,6 +465,18 @@ fn report_line(line: &str) -> Option<Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn left_out_mods_and_broken_data_are_reported_plainly() {
+        let log = "[01:00:00] [Render thread/INFO]: Java mods: Lithium isn't needed in Horizon: Horizon's own engine is already fast (left out)\n\
+                   [01:00:01] [Render thread/INFO]: Java mods: justenoughbreeding's recipe justenoughbreeding:breeding/x can't be read (left out): Failed to parse\n";
+        let f = failures_in(log);
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].name.as_deref(), Some("Lithium"));
+        assert!(f[0].text.contains("isn't needed in Horizon"));
+        assert_eq!(f[1].name.as_deref(), Some("justenoughbreeding"));
+        assert!(f[1].text.ends_with("can't be read (left out)"));
+    }
 
     fn jar(path: &Path, meta: Option<&str>) {
         let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
@@ -532,6 +587,16 @@ More details:
 
     fn on_26_3(wants: serde_json::Value) -> Option<bool> {
         runs_on(&wants, "26.3")
+    }
+
+    #[test]
+    fn compares_pre_release_parts_as_numbers() {
+        let wants = serde_json::json!(">=26.3-6.0.9");
+        assert_eq!(runs_on(&wants, "26.3-6.0.10"), Some(true));
+        assert_eq!(runs_on(&wants, "26.3-6.0.9"), Some(true));
+        assert_eq!(runs_on(&wants, "26.3-6.0.8"), Some(false));
+        assert_eq!(runs_on(&serde_json::json!(">=1.0-rc.2"), "1.0-rc.10"), Some(true));
+        assert_eq!(runs_on(&serde_json::json!(">=1.0-beta"), "1.0-alpha"), Some(false));
     }
 
     #[test]

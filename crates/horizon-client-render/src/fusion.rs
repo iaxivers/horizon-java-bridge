@@ -174,19 +174,28 @@ fn connecting_textures(root: &Path) -> HashMap<String, Meta> {
     let Ok(namespaces) = fs::read_dir(root.join("assets")) else {
         return out;
     };
-    for ns in namespaces.flatten() {
-        let ns_name = ns.file_name().to_string_lossy().into_owned();
-        let textures = ns.path().join("textures");
-        for path in mcmeta_files(&textures) {
+    // Every namespace's .mcmeta files listed and read at once: a modded pack's hundreds of
+    // namespaces and tens of thousands of files, walked one at a time, took up to a minute of a
+    // start. Only the files naming Fusion are kept. (UMP, 2026-11-14)
+    let namespaces: Vec<_> = namespaces.flatten().collect();
+    let found: Vec<Vec<(String, PathBuf, PathBuf, String)>> =
+        crate::par::par_map(&namespaces, |ns| {
+            let ns_name = ns.file_name().to_string_lossy().into_owned();
+            let textures = ns.path().join("textures");
+            mcmeta_files(&textures)
+                .into_iter()
+                .filter_map(|path| {
+                    let text = horizon_core::prepared_files::read_to_string(&path).ok()?;
+                    text.contains("fusion")
+                        .then(|| (ns_name.clone(), textures.clone(), path, text))
+                })
+                .collect()
+        });
+    for (ns_name, textures, path, text) in found.into_iter().flatten() {
+        {
             let Some(png) = path.to_str().and_then(|p| p.strip_suffix(".png.mcmeta")) else {
                 continue;
             };
-            let Ok(text) = horizon_core::prepared_files::read_to_string(&path) else {
-                continue;
-            };
-            if !text.contains("fusion") {
-                continue;
-            }
             let Some(rel) = Path::new(png)
                 .strip_prefix(&textures)
                 .ok()

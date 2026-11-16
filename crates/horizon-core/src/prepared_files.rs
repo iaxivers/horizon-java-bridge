@@ -311,13 +311,36 @@ pub fn write(root: &Path) -> io::Result<()> {
                 .collect::<Vec<_>>()
                 .as_slice(),
         )?;
-        for (_, path, len) in &files {
-            let bytes = fs::read(path)?;
-            // Changed since it was listed: the offsets would be wrong.
-            if bytes.len() as u64 != *len {
-                return Err(io::Error::other(format!("{} changed", path.display())));
+        // Read by several threads a batch at a time, written in order: a modded pack's content
+        // root has about 200,000 files, and read one at a time (each first read scanned on
+        // Windows) writing the file took over ten minutes. (UMP, 2026-11-14)
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16);
+        for batch in files.chunks(4096) {
+            let per = batch.len().div_ceil(threads).max(1);
+            let read: Vec<io::Result<Vec<u8>>> = std::thread::scope(|scope| {
+                let jobs: Vec<_> = batch
+                    .chunks(per)
+                    .map(|part| {
+                        scope.spawn(move || {
+                            part.iter().map(|(_, path, _)| fs::read(path)).collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                jobs.into_iter()
+                    .flat_map(|job| {
+                        job.join()
+                            .unwrap_or_else(|_| vec![Err(io::Error::other("a reading thread panicked"))])
+                    })
+                    .collect()
+            });
+            for ((_, path, len), bytes) in batch.iter().zip(read) {
+                let bytes = bytes?;
+                // Changed since it was listed: the offsets would be wrong.
+                if bytes.len() as u64 != *len {
+                    return Err(io::Error::other(format!("{} changed", path.display())));
+                }
+                out.write_all(&bytes)?;
             }
-            out.write_all(&bytes)?;
         }
         out.into_inner()
             .map_err(io::IntoInnerError::into_error)?

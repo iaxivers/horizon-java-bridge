@@ -747,7 +747,9 @@ impl Items {
         block_for_item: &HashMap<&str, BlockStateId>,
         overlay: &PackOverlay,
     ) -> Result<Self> {
+        let started = std::time::Instant::now();
         let raw = horizon_world::item_defaults::shared(root)?;
+        let t_defaults = started.elapsed();
         let entity_tags = load_tags(root, "entity_type", overlay)?;
         let path = root.join(MOD_CRAFT_REMAINDERS);
         let mod_remainders: HashMap<String, String> = match fs::read(&path) {
@@ -974,21 +976,36 @@ impl Items {
         // gameplay/chicken_lay, shearing/sheep/red...), of every namespace
         // (content mods' tables, docs/modpacks.md), with the packs' over the
         // game's own: one map with the loot data of the same root and packs.
+        let t_items = started.elapsed();
         let loot = horizon_world::loot::shared_tables(root, overlay)?;
+        let t_loot = started.elapsed();
         let registry_order = registry_order(root, &order);
         set_villager_food(&items);
+        let block_tags = load_tags(root, "block", overlay)?;
+        let item_tags = load_tags(root, "item", overlay)?;
+        let item_tag_order = load_tag_lists(root, "item", overlay)?;
+        let t_tags = started.elapsed();
+        let enchantments = Arc::new(crate::enchant::Enchantments::load_with(root, overlay));
+        log::info!(
+            "Horizon: items: defaults {:.1}s, items {:.1}s, loot {:.1}s, tags {:.1}s, enchantments {:.1}s",
+            t_defaults.as_secs_f32(),
+            (t_items - t_defaults).as_secs_f32(),
+            (t_loot - t_items).as_secs_f32(),
+            (t_tags - t_loot).as_secs_f32(),
+            (started.elapsed() - t_tags).as_secs_f32()
+        );
         Ok(Self {
             items,
             mob_visibility,
             order,
             registry_order,
-            block_tags: load_tags(root, "block", overlay)?,
-            item_tags: load_tags(root, "item", overlay)?,
-            item_tag_order: load_tag_lists(root, "item", overlay)?,
+            block_tags,
+            item_tags,
+            item_tag_order,
             loot,
             songs: load_songs(root),
             instruments: load_instruments(root),
-            enchantments: Arc::new(crate::enchant::Enchantments::load_with(root, overlay)),
+            enchantments,
         })
     }
     pub fn get(&self, id: &str) -> Option<&ItemInfo> {

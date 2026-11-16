@@ -54,11 +54,25 @@ public final class HorizonClient {
      */
     public static void gameStart(boolean after) {
         HorizonHooks.scanNow();
+        // The mixins' field initializers on the client, which its constructor would run first
+        // (allocated without it): Spell Engine's key list was null in every key handling.
+        // (UMP, 2026-11-11)
+        if (!after) HorizonHooks.initFields(minecraft);
         HorizonHooks.fireClient(minecraft, after ? HorizonHooks.START_AFTER : HorizonHooks.START_BEFORE);
     }
 
     /** Minecraft's constructor at its options, after the registries' freeze (FabricBoot). */
     public static void optionsStart() {
+        // Minecraft's constructor makes its block colours before its options and the end of its
+        // start, where mods register tints (WorldWeaver's applyBlockTints: BetterEnd, BetterNether
+        // got null). The models' load later keeps this one and its registrations. (UMP, 2026-11-11)
+        try {
+            if (minecraft.getBlockColors() == null) {
+                set(Minecraft.class, minecraft, "blockColors", net.minecraft.client.color.block.BlockColors.createDefault());
+            }
+        } catch (Throwable t) {
+            Natives.log("Horizon's client: no block colours at its start: " + t);
+        }
         HorizonHooks.fireClient(minecraft, HorizonHooks.START_OPTIONS);
         HorizonHooks.fireClient(minecraft, HorizonHooks.START_END);
     }
@@ -504,25 +518,25 @@ public final class HorizonClient {
     }
 
     /** Fields set by name, looked up once (entities' snapshots set some for each entity). */
-    private static final java.util.Map<Class<?>, java.util.Map<String, Field>> FIELDS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.Map<Class<?>, java.util.Map<String, Field>> FIELD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
     static void set(Class<?> owner, Object target, String name, Object value) throws ReflectiveOperationException {
-        Field field = FIELDS.computeIfAbsent(owner, o -> new java.util.concurrent.ConcurrentHashMap<>()).get(name);
+        Field field = FIELD_CACHE.computeIfAbsent(owner, o -> new java.util.concurrent.ConcurrentHashMap<>()).get(name);
         if (field == null) {
             field = owner.getDeclaredField(name);
             field.setAccessible(true);
-            FIELDS.get(owner).put(name, field);
+            FIELD_CACHE.get(owner).put(name, field);
         }
         field.set(target, value);
     }
 
     /** A field read by name (looked up once, as {@link #set}). */
     static Object get(Class<?> owner, Object target, String name) throws ReflectiveOperationException {
-        Field field = FIELDS.computeIfAbsent(owner, o -> new java.util.concurrent.ConcurrentHashMap<>()).get(name);
+        Field field = FIELD_CACHE.computeIfAbsent(owner, o -> new java.util.concurrent.ConcurrentHashMap<>()).get(name);
         if (field == null) {
             field = owner.getDeclaredField(name);
             field.setAccessible(true);
-            FIELDS.get(owner).put(name, field);
+            FIELD_CACHE.get(owner).put(name, field);
         }
         return field.get(target);
     }
@@ -1107,7 +1121,18 @@ public final class HorizonClient {
         };
         channel.remoteAddress();
         channel.localAddress();
+        // A handler stays in its pipeline, as a real connection's packet handler does: mods keep
+        // per-connection state on the pipeline's last handler context (Multiloader Data
+        // Extensions' known data maps: pipeline().lastContext().attr(...), null on an empty
+        // pipeline, which failed the player's configuration). Netty keeps handlers on a closed
+        // channel's pipeline only until it is deregistered, so it is added after close.
+        // (UMP, 2026-11-15)
         channel.close();
+        try {
+            channel.pipeline().addLast("horizon_packet_handler", new io.netty.channel.ChannelInboundHandlerAdapter());
+        } catch (Throwable t) {
+            Natives.log("Horizon's client: its connection's pipeline has no handler: " + t);
+        }
         try {
             set(net.minecraft.network.Connection.class, connection, "channel", channel);
         } catch (ReflectiveOperationException e) {
@@ -1815,19 +1840,19 @@ public final class HorizonClient {
             gpuParts = true;
             if (HorizonGpu.installed()) guiRenderer(minecraft.gameRenderer);
         }
-        tasks();
-        // ClientLifecycleEvents.CLIENT_STARTED: Minecraft's first frame, before any world (Jade
-        // finishes registering its tooltip providers there).
-        if (!started) {
-            started = true;
-            reloadClientResources();
-            // The GPU's shaders: the GUI pipelines' fallback cache over the client's resources
-            // (vanilla's and the mods' shaders), as Minecraft's start makes it.
-            if (HorizonGpu.installed() && minecraft.getResourceManager() != null) models();
-            HorizonServer.fireEach("ClientLifecycleEvents.CLIENT_STARTED",
-                    net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents.CLIENT_STARTED, l -> l.onClientStarted(minecraft));
-            reloadAddedListeners();
+        // The client's first frame, if it started at the title (startAtTitle): done before this tick.
+        Thread early = earlyStart;
+        if (early != null) {
+            try {
+                early.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            earlyStart = null;
+            renderThread();
         }
+        tasks();
+        clientStart();
         finishModels();
         // Its loading is done once the models are (Minecraft.isGameLoadFinished: MiniHUD draws
         // nothing before).
@@ -1941,6 +1966,54 @@ public final class HorizonClient {
     }
 
     private static boolean started;
+    private static volatile Thread earlyStart;
+
+    /**
+     * ClientLifecycleEvents.CLIENT_STARTED: Minecraft's first frame, before any world (Jade
+     * finishes registering its tooltip providers there), with the client's resource reload and the
+     * models' reload started before it. Once.
+     */
+    private static synchronized void clientStart() {
+        if (started) return;
+        started = true;
+        reloadClientResources();
+        // The GPU's shaders: the GUI pipelines' fallback cache over the client's resources
+        // (vanilla's and the mods' shaders), as Minecraft's start makes it.
+        if (HorizonGpu.installed() && minecraft.getResourceManager() != null) models();
+        HorizonServer.fireEach("ClientLifecycleEvents.CLIENT_STARTED",
+                net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents.CLIENT_STARTED, l -> l.onClientStarted(minecraft));
+        reloadAddedListeners();
+    }
+
+    /**
+     * The client's first frame (clientStart) while the player is idle at the title screen, on a
+     * thread of its own: a client's first frame comes before any world, and here it ran in the
+     * world's join (JourneyMap's CLIENT_STARTED ~2 s, the client reload and the models' start ~1 s,
+     * with 184 mods). Horizon asks for it from the title's frames while no world is being opened;
+     * the mirror's first tick waits for it. Started with a world opening at the same time it
+     * competed with the world's Java start and gained nothing (UMP, 2026-11-15).
+     * HORIZON_EARLY_CLIENT=0: on the first tick as before.
+     */
+    public static void startAtTitle() {
+        if (started || earlyStart != null || minecraft == null || minecraft.font == null
+                || "0".equals(System.getenv("HORIZON_EARLY_CLIENT"))) return;
+        ClassLoader loader = HorizonClient.class.getClassLoader();
+        Thread thread = new Thread(() -> {
+            Thread.currentThread().setContextClassLoader(loader);
+            long began = System.nanoTime();
+            try {
+                renderThread();
+                clientStart();
+            } catch (Throwable t) {
+                Natives.log("Horizon's client: its first frame failed: " + t);
+            }
+            Natives.log("Horizon's client: its first frame (resources, CLIENT_STARTED) ran at the title in "
+                    + (System.nanoTime() - began) / 1_000_000 + " ms");
+        }, "Horizon client start");
+        thread.setDaemon(true);
+        earlyStart = thread;
+        thread.start();
+    }
 
     /**
      * The client's block and item models, as Minecraft's resource reload makes them, now that
@@ -1966,7 +2039,9 @@ public final class HorizonClient {
             Natives.log("Horizon's client: the client's bootstrap stopped at " + t);
         }
         try {
-            var colors = net.minecraft.client.color.block.BlockColors.createDefault();
+            // The start's block colours (with the tints mods registered there), else new ones.
+            var colors = minecraft.getBlockColors() != null ? minecraft.getBlockColors()
+                    : net.minecraft.client.color.block.BlockColors.createDefault();
             set(Minecraft.class, minecraft, "blockColors", colors);
             var atlases = new net.minecraft.client.resources.model.sprite.AtlasManager(minecraft.getTextureManager(), 0);
             var skins = (net.minecraft.client.renderer.PlayerSkinRenderCache) Natives.allocate(net.minecraft.client.renderer.PlayerSkinRenderCache.class);
@@ -2605,6 +2680,7 @@ public final class HorizonClient {
      */
     @SuppressWarnings("unchecked")
     private static void reloadClientResources() {
+        long reloadStarted = System.nanoTime();
         var type = net.minecraft.server.packs.PackType.CLIENT_RESOURCES;
         java.util.List<net.minecraft.server.packs.PackResources> packs = new java.util.ArrayList<>();
         try {
@@ -2655,10 +2731,18 @@ public final class HorizonClient {
         var manager = new net.minecraft.server.packs.resources.MultiPackResourceManager(type, packs);
         // The client's resource manager (Minecraft.getResourceManager: Xaero reads its radar
         // icons' definitions there), over the same packs.
+        // Listeners mods put in that manager's own list as it is made (Subtle Effects' splash
+        // types, added first: its fluid definitions read them), which vanilla's reload runs with
+        // the rest: run here, before the mods' Fabric listeners. (UMP, 2026-11-15)
+        java.util.List<net.minecraft.server.packs.resources.PreparableReloadListener> managerListeners = java.util.List.of();
         try {
             var reloadable = new net.minecraft.server.packs.resources.ReloadableResourceManager(type);
             set(net.minecraft.server.packs.resources.ReloadableResourceManager.class, reloadable, "resources", manager);
             set(Minecraft.class, minecraft, "resourceManager", reloadable);
+            @SuppressWarnings("unchecked")
+            var own = (java.util.List<net.minecraft.server.packs.resources.PreparableReloadListener>)
+                    field(net.minecraft.server.packs.resources.ReloadableResourceManager.class, reloadable, "listeners");
+            if (own != null) managerListeners = new java.util.ArrayList<>(own);
         } catch (Throwable t) {
             Natives.log("Horizon's client: no client resource manager: " + t);
         }
@@ -2673,10 +2757,28 @@ public final class HorizonClient {
                 Natives.log("Horizon's client: the GPU's shaders couldn't be loaded: " + t);
             }
         }
+        // The entity render dispatcher, which Minecraft's constructor makes before this reload.
+        HorizonEntityRender.dispatcher();
         java.util.concurrent.Executor here = Runnable::run;
         int ran = 0;
         int skipped = 0;
-        for (var listener : new java.util.ArrayList<>(listeners)) {
+        // In the order the mods asked for (ResourceLoader.addListenerOrdering), as the game's reload
+        // sorts them: Subtle Effects' fluid definitions read its splash types, loaded by another of
+        // its listeners, and found none ("Splash type ... not found") when run first. (UMP, 2026-11-15)
+        java.util.List<net.minecraft.server.packs.resources.PreparableReloadListener> ordered = new java.util.ArrayList<>(listeners);
+        try {
+            ordered = new java.util.ArrayList<>(net.fabricmc.fabric.impl.resource.ResourceLoaderImpl.sort(type, ordered));
+        } catch (Throwable t) {
+            Natives.log("Horizon's client: the mods' reload listeners keep their registration order: " + t);
+        }
+        for (int i = managerListeners.size() - 1; i >= 0; i--) {
+            var own = managerListeners.get(i);
+            // The game's own (vanilla's, Fabric's marker) have nothing to load into here.
+            String name = own.getClass().getName();
+            if (name.startsWith("net.minecraft.") || name.startsWith("net.fabricmc.") || ordered.contains(own)) continue;
+            ordered.add(0, own);
+        }
+        for (var listener : ordered) {
             RELOADED.add(listener);
             if (afterModels(listener)) {
                 // Run with the models' reload instead (models()), after them as Fabric orders
@@ -2686,8 +2788,11 @@ public final class HorizonClient {
                 continue;
             }
             try {
+                long began = System.nanoTime();
                 net.minecraft.server.packs.resources.SimpleReloadInstance.of(manager, java.util.List.of(listener), here, here,
                         java.util.concurrent.CompletableFuture.completedFuture(net.minecraft.util.Unit.INSTANCE)).done().join();
+                long took = (System.nanoTime() - began) / 1_000_000;
+                if (took >= 200) Natives.log("Horizon's client: a mod's resource reload took " + took + " ms: " + listener.getClass().getName());
                 ran++;
             } catch (Throwable t) {
                 Throwable root = t;
@@ -2706,7 +2811,8 @@ public final class HorizonClient {
                 }
             }
         }
-        Natives.log("Horizon's client: " + ran + " of the mods' resource reload listeners ran over " + packs.size()
+        Natives.log("Horizon's client: " + ran + " of the mods' resource reload listeners ran in "
+                + (System.nanoTime() - reloadStarted) / 1_000_000 + " ms over " + packs.size()
                 + " packs" + (skipped > 0 ? "; " + skipped + " that read baked models or textures run with the models" : ""));
     }
 
@@ -3411,6 +3517,11 @@ public final class HorizonClient {
                 // Its tick rate (ClientboundTickingStatePacket's): the server's (potions'
                 // tooltips read it for their durations; JEI's search reads every tooltip).
                 set(owner, level, "tickRateManager", server.tickRateManager());
+                // Its level extractor (the renderer the constructor gives it): the client's, which
+                // Horizon's draw stands in for (LevelExtractorMixin: nothing to redraw). Without it
+                // every block change a mod's block entity makes on the client (Yuushya's, Supplementaries')
+                // threw, every tick. (UMP, 2026-11-12)
+                set(owner, level, "levelExtractor", minecraft.levelExtractor);
                 // Its chunk source (mods ask it for the light engine: Xaero's World Map), its
                 // light Horizon's as the level's own (LevelMixin).
                 try {
@@ -3527,14 +3638,45 @@ public final class HorizonClient {
     /** HORIZON_JAVA_DEBUG=hud: each HUD frame's size is logged. */
     private static final boolean DEBUG_HUD = String.valueOf(System.getenv("HORIZON_JAVA_DEBUG")).contains("hud");
     private static final java.util.Map<String, Integer> HUD_FAILURES = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int HUD_EVERY = Math.max(1, Integer.parseInt(String.valueOf(System.getenv("HORIZON_HUD_EVERY")).replaceAll("\\D", "").isEmpty() ? "2" : String.valueOf(System.getenv("HORIZON_HUD_EVERY")).replaceAll("\\D", "")));
     /** The last HUD sent to each player. */
     private static final java.util.Map<java.util.UUID, String> HUD_SENT = new java.util.concurrent.ConcurrentHashMap<>();
     /** Hud's parts under extractPlayerHealth (the hearts, food, armour, air: AppleSkin's). */
     private static final java.util.Set<String> HEALTH_PARTS = java.util.Set.of(
             "extractPlayerHealth", "extractHearts", "extractHeart", "extractFood", "extractArmor", "extractAirBubbles");
 
+    /**
+     * Hud's methods named {@code name} that draw a part (GuiGraphicsExtractor, maybe DeltaTracker),
+     * accessible, found once: the HUD is drawn every tick for every player, and looking them up by
+     * reflection each time cost several ms a tick with a big pack (UMP profile). (UMP, 2026-11-11)
+     */
+    private static final java.util.Map<String, java.util.List<java.lang.reflect.Method>> HUD_PARTS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static java.util.List<java.lang.reflect.Method> hudParts(String name) {
+        return HUD_PARTS.computeIfAbsent(name, n -> {
+            java.util.List<java.lang.reflect.Method> out = new java.util.ArrayList<>();
+            for (var m : net.minecraft.client.gui.Hud.class.getDeclaredMethods()) {
+                if (!m.getName().equals(n) || m.isSynthetic()) continue;
+                Class<?>[] params = m.getParameterTypes();
+                boolean one = params.length == 1 && params[0] == net.minecraft.client.gui.GuiGraphicsExtractor.class;
+                boolean two = params.length == 2 && params[0] == net.minecraft.client.gui.GuiGraphicsExtractor.class
+                        && params[1] == net.minecraft.client.DeltaTracker.class;
+                if (!one && !two) continue;
+                m.setAccessible(true);
+                out.add(m);
+            }
+            return out;
+        });
+    }
+
     /** The player's HUD as their client's mods draw it, to them when it changed. */
     private static void sendHud(net.minecraft.server.level.ServerPlayer player) {
+        // Built every 2nd tick (10 a second, as often as the minimap's picture already is): the
+        // mods' HUD cost 9-10 ms of every tick with 300 mods, a core's fifth while standing still
+        // (user: CPU used a lot). The player's game keeps showing the last one between.
+        // HORIZON_HUD_EVERY=1 builds it every tick. (UMP, 2026-11-14)
+        if (HUD_EVERY > 1 && Math.floorMod(player.tickCount, HUD_EVERY) != 0 && HUD_SENT.containsKey(player.getUUID())) return;
         String frame = hud(player).toString();
         if (frame.equals(HUD_SENT.get(player.getUUID()))) return;
         HUD_SENT.put(player.getUUID(), frame);
@@ -3579,17 +3721,9 @@ public final class HorizonClient {
         for (String method : hooked) {
             if (HEALTH_PARTS.contains(method) || method.equals("extractRenderState")) continue;
             hudPart(method, () -> {
-                for (var m : net.minecraft.client.gui.Hud.class.getDeclaredMethods()) {
-                    if (!m.getName().equals(method) || m.isSynthetic()) continue;
-                    Class<?>[] params = m.getParameterTypes();
-                    if (params.length == 1 && params[0] == net.minecraft.client.gui.GuiGraphicsExtractor.class) {
-                        m.setAccessible(true);
-                        m.invoke(hud, graphics);
-                    } else if (params.length == 2 && params[0] == net.minecraft.client.gui.GuiGraphicsExtractor.class
-                            && params[1] == net.minecraft.client.DeltaTracker.class) {
-                        m.setAccessible(true);
-                        m.invoke(hud, graphics, delta);
-                    }
+                for (var m : hudParts(method)) {
+                    if (m.getParameterCount() == 1) m.invoke(hud, graphics);
+                    else m.invoke(hud, graphics, delta);
                 }
             });
         }
@@ -3614,14 +3748,20 @@ public final class HorizonClient {
         return graphics.ops();
     }
 
+    /** Methods looked up once by class, name and argument count (call() runs every tick). */
+    private static final java.util.Map<String, java.util.Optional<java.lang.reflect.Method>> CALLS = new java.util.concurrent.ConcurrentHashMap<>();
+
     private static void call(Object target, String name, Object... args) throws Throwable {
-        for (var m : target.getClass().getDeclaredMethods()) {
-            if (m.getName().equals(name) && m.getParameterCount() == args.length) {
-                m.setAccessible(true);
-                m.invoke(target, args);
-                return;
+        var m = CALLS.computeIfAbsent(target.getClass().getName() + "#" + name + "/" + args.length, k -> {
+            for (var c : target.getClass().getDeclaredMethods()) {
+                if (c.getName().equals(name) && c.getParameterCount() == args.length) {
+                    c.setAccessible(true);
+                    return java.util.Optional.of(c);
+                }
             }
-        }
+            return java.util.Optional.empty();
+        });
+        if (m.isPresent()) m.get().invoke(target, args);
     }
 
     /** One part of the HUD; one failing (each frame) is told a few times and the rest still draw. */
@@ -3630,8 +3770,12 @@ public final class HorizonClient {
         // minimap: RenderSystem.getDevice()) fails every frame.
         Integer failed = HUD_FAILURES.get(part);
         if (failed != null && failed >= 3) return;
+        // Each part's time in the profile (HORIZON_JAVA_PROFILE): which mod's overlay the
+        // HUD's cost is. (UMP, 2026-11-13)
+        long started = HorizonProfile.start();
         try {
             run.run();
+            HorizonProfile.add("HUD " + part, started);
             if (failed != null) HUD_FAILURES.remove(part);
         } catch (Throwable t) {
             Throwable root = t;
@@ -3809,9 +3953,16 @@ public final class HorizonClient {
         });
     }
 
+    /** Fields looked up once (field() runs every tick: the HUD, the camera, each player). */
+    private static final java.util.Map<Class<?>, java.util.Map<String, Field>> FIELDS = new java.util.concurrent.ConcurrentHashMap<>();
+
     static Object field(Class<?> owner, Object target, String name) throws ReflectiveOperationException {
-        Field field = owner.getDeclaredField(name);
-        field.setAccessible(true);
+        Field field = FIELD_CACHE.computeIfAbsent(owner, o -> new java.util.concurrent.ConcurrentHashMap<>()).get(name);
+        if (field == null) {
+            field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            FIELD_CACHE.get(owner).put(name, field);
+        }
         return field.get(target);
     }
 

@@ -82,7 +82,20 @@ pub(super) fn content_root(
     let here = std::env::current_dir().unwrap_or_default();
     // The Java mods' content mods are always on, as dev mods are (the jars in mods-java/ are
     // what turns them on and off).
-    let dev = &[dev, super::java_mods::java_content(root).as_slice()].concat();
+    let java = horizon_client::spans::startup::time("content.java_content", || super::java_mods::java_content(root));
+    // A content root built before (its stamp is there): Java and Fabric start now, beside the
+    // reading of the mods' content below (40 s with a big pack), not after it; their start
+    // (90 s with 184 mods: mixins and the mods' entrypoints) is what a world's join waits for.
+    // When the root must be built again after all, the build runs beside Java's start, which
+    // only costs memory. (UMP, 2026-11-14)
+    if horizon_cache()
+        .join("mod-content")
+        .join(horizon_client::mod_content::STAMP_FILE)
+        .is_file()
+    {
+        super::java_mods::start_early();
+    }
+    let dev = &[dev, java.as_slice()].concat();
     let mut paths = horizon_mods::find(&here.join(mod_list::DIR));
     paths.retain(|p| !dev.contains(p));
     paths.extend(dev.iter().cloned());
@@ -91,26 +104,54 @@ pub(super) fn content_root(
     // The first load's list stays (`set_local`): a reload does not hash the files again.
     let announce = !horizon_protocol::mod_list::is_set();
     let mut announced = Vec::new();
-    for path in &paths {
-        let Ok(package) = Package::read(path) else {
+    // Every mod's package and content read up front, by several threads: walking a big pack's
+    // mod folders (200k files for 184 mods) one mod at a time took most of a minute of each
+    // start. Accepted below in the same order as before. (UMP, 2026-11-14)
+    let read: Vec<Option<(Package, Result<Content, String>)>> = {
+        let paths_ref = &paths;
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<std::sync::Mutex<Option<(Package, Result<Content, String>)>>> =
+            paths.iter().map(|_| std::sync::Mutex::new(None)).collect();
+        let threads = horizon_threads::worker_count().clamp(1, 12);
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(path) = paths_ref.get(i) else {
+                        return;
+                    };
+                    let Ok(package) = Package::read(path) else {
+                        continue;
+                    };
+                    let m = &package.manifest;
+                    let on = enabled.contains(&m.id) || dev.contains(path);
+                    if !on || !m.capabilities.contains(&Capability::Registries) {
+                        continue;
+                    }
+                    let declared: Vec<String> = native_declared()
+                        .1
+                        .iter()
+                        .filter(|i| i.id.split_once(':').is_some_and(|(ns, _)| ns == m.id))
+                        .map(|i| i.id.clone())
+                        .collect();
+                    let content = horizon_client::spans::startup::time("content.read_mods", || {
+                        Content::read_declaring(path, m, &declared)
+                    });
+                    *slots[i].lock().unwrap() = Some((package, content));
+                });
+            }
+        });
+        slots.into_iter().map(|s| s.into_inner().unwrap()).collect()
+    };
+    for (path, read) in paths.iter().zip(read) {
+        let Some((package, content)) = read else {
             continue;
         };
         let m = &package.manifest;
-        let on = enabled.contains(&m.id) || dev.contains(path);
-        if !on
-            || !m.capabilities.contains(&Capability::Registries)
-            || mods.iter().any(|c| c.id == m.id)
-        {
+        if mods.iter().any(|c| c.id == m.id) {
             continue;
         }
-        // The items this mod's native code declares may be a file item's crafting remainder.
-        let declared: Vec<String> = native_declared()
-            .1
-            .iter()
-            .filter(|i| i.id.split_once(':').is_some_and(|(ns, _)| ns == m.id))
-            .map(|i| i.id.clone())
-            .collect();
-        let content = match Content::read_declaring(path, m, &declared) {
+        let content = match content {
             Ok(content) => content,
             Err(e) => {
                 log::warn!("Horizon: mod {} content not loaded: {e}", m.id);
@@ -157,7 +198,26 @@ pub(super) fn content_root(
             }
         }
     }
-    let built = mod_content::resource_root(root, &mods, &horizon_cache());
+    // More block states than a world holds: the biggest mods are left out, the rest load.
+    let too_big = mod_content::fit_states(root, &mut mods);
+    if !too_big.is_empty() {
+        let lines: Vec<String> = too_big
+            .iter()
+            .map(|(id, n)| {
+                format!(
+                    "{id} left out: its {n} block states don't fit beside the other mods' (a world holds {} in all)",
+                    mod_content::MAX_STATES
+                )
+            })
+            .collect();
+        for line in &lines {
+            log::warn!("Horizon: {line}");
+        }
+        *LEFT_OUT_FOR_STATES.lock().unwrap_or_else(|e| e.into_inner()) = lines;
+    }
+    let built = horizon_client::spans::startup::time("content.resource_root", || {
+        mod_content::resource_root(root, &mods, &horizon_cache())
+    });
     super::java_mods::start_early();
     match built {
         Ok(out) => {
@@ -188,6 +248,9 @@ pub(super) fn content_root(
         }
     }
 }
+
+/// Content mods left out because their block states didn't fit (`fit_states`), as lines players read.
+pub(in crate::game) static LEFT_OUT_FOR_STATES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// A loaded mod as a server tells joining clients (`horizon_protocol::mod_list`): its manifest's
 /// id, version and side, and the SHA-256 of its `.hmod` (none for a folder).

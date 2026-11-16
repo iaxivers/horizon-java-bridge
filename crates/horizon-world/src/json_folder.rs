@@ -52,15 +52,7 @@ pub fn read(dir: &Path) -> io::Result<Arc<Folder>> {
     }
     let files = match prepared(dir) {
         Some(files) => files,
-        None => list(dir)?
-            .into_iter()
-            .map(|(name, path)| {
-                let bytes = fs::read(&path)
-                    .map(Vec::into_boxed_slice)
-                    .map_err(|e| (e.kind(), e.to_string()));
-                File { name, path, bytes }
-            })
-            .collect(),
+        None => read_all(list(dir)?),
     };
     let folder = Arc::new(Folder { files });
     let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
@@ -71,6 +63,39 @@ pub fn read(dir: &Path) -> io::Result<Arc<Folder>> {
     open.retain(|(_, f)| f.strong_count() > 0);
     open.push((dir.to_owned(), Arc::downgrade(&folder)));
     Ok(folder)
+}
+
+/// Reads the listed files, by several threads when there are many: a modded pack's folders
+/// hold tens of thousands of separate files (its mods' recipes, loot tables, models), one open
+/// and read each, and one at a time they took minutes of a start. In list order. (UMP, 2026-11-13)
+fn read_all(listed: Vec<(String, PathBuf)>) -> Vec<File> {
+    let read = |(name, path): (String, PathBuf)| {
+        let bytes = fs::read(&path)
+            .map(Vec::into_boxed_slice)
+            .map_err(|e| (e.kind(), e.to_string()));
+        File { name, path, bytes }
+    };
+    if listed.len() < 512 {
+        return listed.into_iter().map(read).collect();
+    }
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 8);
+    let chunk = listed.len().div_ceil(threads);
+    let mut parts: Vec<Vec<(String, PathBuf)>> = Vec::new();
+    let mut rest = listed.into_iter().peekable();
+    while rest.peek().is_some() {
+        parts.push(rest.by_ref().take(chunk).collect());
+    }
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = parts
+            .into_iter()
+            .map(|part| scope.spawn(move || part.into_iter().map(read).collect::<Vec<_>>()))
+            .collect();
+        jobs.into_iter()
+            .flat_map(|job| job.join().unwrap_or_default())
+            .collect()
+    })
 }
 
 /// `dir`'s `.json` files from its prepared root's `horizon-data.bin`, when

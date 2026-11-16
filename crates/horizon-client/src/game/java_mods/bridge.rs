@@ -52,6 +52,10 @@ pub(in crate::game) fn mod_jars() -> (PathBuf, Vec<PathBuf>) {
     let dir = Game::options_path().with_file_name(horizon_jvm::DIR);
     if opted_in() {
         let jars = run_jars(&dir);
+        if !jars.is_empty() {
+            // Before the window opens (the content root is read first): see share_vulkan_instance.
+            share_vulkan_instance();
+        }
         return (dir, jars);
     }
     static SAID: std::sync::Once = std::sync::Once::new();
@@ -391,6 +395,13 @@ pub(in crate::game) fn level_named(id: &str) -> super::super::Dim {
     if let Some(dim) = super::super::Dim::known(id) {
         return dim;
     }
+    // No dimension saved (a new world, or level.dat without a player): the overworld, which
+    // needs nothing from the mods. Waiting for their start here held the world's opening
+    // behind the whole Java start (UMP startup trace: world.level_named 13.8 s with 184 mods).
+    // (UMP, 2026-11-15)
+    if id.is_empty() {
+        return super::super::Dim::Overworld;
+    }
     if has_java_mods() {
         wait_for_java(std::time::Duration::from_secs(300));
     }
@@ -401,12 +412,36 @@ pub(in crate::game) fn level_named(id: &str) -> super::super::Dim {
 /// a second instance's device enumeration crashed in the Vulkan loader (Fedora 43, RADV, the
 /// user's PC, 2026-11-05: the game died opening its window after Java's device was up).
 fn share_vulkan_instance() {
-    let _ = horizon_client::gfx::SHARED_INSTANCE.set(horizon_jvm::gpu::instance);
+    // The window asks for the instance when it opens: the Java mods' device opens then, first,
+    // so it always comes before the window's swapchain. Opened after it (a warm start, where
+    // Java's start and the window race), an overlay hooking the window's present (RivaTuner/RTSS,
+    // MSI Afterburner) crashed in the AMD driver on the first frame after (UMP's new-player
+    // test, Windows, RX 7600): first starts, Java's device first, never did. (UMP, 2026-11-11)
+    let _ = horizon_client::gfx::SHARED_INSTANCE.set(|| {
+        horizon_jvm::gpu::open_now();
+        horizon_jvm::gpu::instance()
+    });
     let _ = horizon_jvm::gpu::SHARED_INSTANCE.set(horizon_client::gfx::own_instance);
 }
 
 /// Set once Java's start has ended, whether it started or not.
 static SETTLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Java mods' client's first frame while the player is idle at the title, once their start
+/// has ended: asked each idle title frame, sent to Java once (it runs it on a thread of its own,
+/// and the mirror's first tick waits for it).
+pub(in crate::game) fn client_start_at_title() {
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ASKED.load(std::sync::atomic::Ordering::Relaxed)
+        || !SETTLED.load(std::sync::atomic::Ordering::SeqCst)
+        || !horizon_jvm::events::ready()
+    {
+        return;
+    }
+    ASKED.store(true, std::sync::atomic::Ordering::Relaxed);
+    log::info!("Java mods: their client's first frame starts at the title");
+    horizon_jvm::events::client_start_at_title();
+}
 
 /// Waits (up to `limit`) for the Java mods' start to end: whether the platform mod runs.
 pub(in crate::game) fn wait_for_java(limit: std::time::Duration) -> bool {
@@ -458,7 +493,16 @@ fn class_archive(jars: &[PathBuf]) -> Option<PathBuf> {
         return None;
     }
     let cache = super::super::mods::horizon_cache();
-    let name = format!("java-classes-{}.jsa", horizon_jvm::content::stamp(jars));
+    // The JVM maps an archive only while its class path is the one it was written with, jar
+    // sizes and times included (CDS's "shared class paths mismatch"); the bridge's own jar is
+    // rewritten by a game update, and the archive was then silently unused: 1,480 of 85,000
+    // classes came from it with 184 mods (UMP, 2026-11-14). This game build (its executable)
+    // is in the name, so an update archives the classes again.
+    let mut stamped = jars.to_vec();
+    if let Ok(exe) = std::env::current_exe() {
+        stamped.push(exe);
+    }
+    let name = format!("java-classes-{}.jsa", horizon_jvm::content::stamp(&stamped));
     if let Ok(entries) = std::fs::read_dir(&cache) {
         for entry in entries.flatten() {
             let other = entry.file_name().to_string_lossy().into_owned();
@@ -568,6 +612,8 @@ fn start_once(root: &Path, dir: &Path, jars: Vec<PathBuf>, side: horizon_jvm::Si
         let mut left: Vec<String> = left_out().iter().map(|l| l.line()).collect();
         // Mods that load but only partly work here (Flashback).
         left.extend(horizon_jvm::renderers::partial_lines(bridge.mods()));
+        // Content mods whose blocks didn't fit in a world (mods.rs: fit_states).
+        left.extend(super::super::mods::LEFT_OUT_FOR_STATES.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned());
         for line in &left {
             log::info!("Java mods: {line}");
         }

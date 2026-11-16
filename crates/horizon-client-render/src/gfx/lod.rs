@@ -322,9 +322,10 @@ impl Renderer {
         let start = Instant::now();
         if self.lod_pending.is_some() {
             // Far tiles fill the arenas too: large translucent pages wait for them.
+            let _wait = crate::spans::guard("lod_up_gate");
             self.shrink_gate.wait(start, super::SHRINK_SETTLE);
         }
-        self.release_left(start);
+        crate::spans::time("lod_up_release", || self.release_left(start));
         let faded: Vec<_> = self
             .lods
             .iter()
@@ -348,6 +349,7 @@ impl Renderer {
         // The columns near chunks take in this job, and the tiles holding the
         // job's new finer ones: a tile meshed again around them keeps its
         // old mesh until they are in, so no hole shows through them.
+        let _plan = crate::spans::guard("lod_up_plan");
         let mut around_new = FxHashSet::default();
         let new = self
             .lod_pending
@@ -373,11 +375,13 @@ impl Renderer {
             .filter(|column| !self.lod_cutout.contains(column))
             .copied()
             .collect();
+        drop(_plan);
         while let Some(pending) = &mut self.lod_pending {
             // Keys meshed again keep their place; removed ones are skipped.
             let next = std::iter::from_fn(|| pending.order.pop_front())
                 .find(|key| pending.meshes.contains_key(key));
             let Some(key) = next else {
+                let _finish = crate::spans::guard("lod_up_finish");
                 let pending = self.lod_pending.take().expect("pending tiles");
                 // A tile fades in over the ones it replaces. One over nothing
                 // shows whole: its hidden chunks would open holes to the sky
@@ -466,7 +470,7 @@ impl Renderer {
                 || taken.iter().any(|&(cx, cz)| {
                     (x..x + size).contains(&(cx * 16)) && (z..z + size).contains(&(cz * 16))
                 });
-            self.upload_lod(key, &mesh, keep);
+            crate::spans::time("lod_up_tile", || self.upload_lod(key, &mesh, keep));
             if start.elapsed() >= budget {
                 return;
             }

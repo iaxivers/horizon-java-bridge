@@ -1467,10 +1467,41 @@ impl Recipes {
         for file in &crate::json_folder::read(&root.join("data/minecraft/recipe"))?.files {
             sources.push((file.name.clone(), file.bytes()?.to_vec()));
         }
-        for namespace in crate::mod_content::namespaces(root) {
-            let dir = root.join(format!("data/{namespace}/recipe"));
-            if dir.is_dir() {
-                for file in &crate::json_folder::read(&dir)?.files {
+        // Every namespace's folder read at once: hundreds with mods, each in turn took tens of
+        // seconds of a start. Added in the same order. (UMP, 2026-11-14)
+        let namespaces: Vec<String> = crate::mod_content::namespaces(root).into_iter().collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<std::sync::Mutex<Option<std::io::Result<Option<std::sync::Arc<crate::json_folder::Folder>>>>>> =
+            namespaces.iter().map(|_| std::sync::Mutex::new(None)).collect();
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 12);
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(namespace) = namespaces.get(i) else {
+                        return;
+                    };
+                    let dir = root.join(format!("data/{namespace}/recipe"));
+                    let read = if dir.is_dir() {
+                        crate::json_folder::read(&dir).map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    *slots[i].lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read);
+                });
+            }
+        });
+        let folders: Vec<std::io::Result<Option<std::sync::Arc<crate::json_folder::Folder>>>> = slots
+            .into_iter()
+            .map(|s| {
+                s.into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .unwrap_or(Ok(None))
+            })
+            .collect();
+        for (namespace, folder) in namespaces.iter().zip(folders) {
+            if let Some(folder) = folder? {
+                for file in &folder.files {
                     sources.push((format!("{namespace}:{}", file.name), file.bytes()?.to_vec()));
                 }
             }

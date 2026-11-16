@@ -5,6 +5,9 @@
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "EntityAccess",
+    "TemplateCacheMixin",
+    "TemplatePaletteMixin",
+    "ShapesJoinMixin",
     "ServerCommonListenerAccess",
     "PlayerListAccess",
     "MinecraftServerAccess",
@@ -47,7 +50,8 @@
     "MirrorUpdatesMixin",
     "MirrorConnectionMixin",
     "CombatCaptureMixin",
-    "FallCaptureMixin"
+    "FallCaptureMixin",
+    "TolerantRegistryMixin"
   ],
   "injectors": {
     "defaultRequire": 1

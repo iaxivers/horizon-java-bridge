@@ -60,7 +60,12 @@ public final class HorizonServer {
 
     private static MinecraftServer server;
     private static PlayerList playerList;
-    private static final Map<ResourceKey<Level>, ServerLevel> LEVELS = new LinkedHashMap<>();
+    /**
+     * The mirror's levels, in the order they were made; also the server's own map (mods iterate
+     * server.getAllLevels()). Made from more than one thread (the far terrain's noise thread), so
+     * changes go through makeLevel's lock and readers copy under it. (UMP, 2026-11-12)
+     */
+    private static final Map<ResourceKey<Level>, ServerLevel> LEVELS = java.util.Collections.synchronizedMap(new LinkedHashMap<>());
     private static final List<ServerPlayer> PLAYERS = new ArrayList<>();
     private static final Map<ServerLevel, List<ServerPlayer>> LEVEL_PLAYERS = new IdentityHashMap<>();
     private static final Map<UUID, ServerPlayer> BY_UUID = new HashMap<>();
@@ -252,7 +257,14 @@ public final class HorizonServer {
 
     /** The headless client's network connection (its packet listener's): a mirror one. */
     static synchronized net.minecraft.network.Connection clientConnection() {
-        if (clientConnection == null) clientConnection = HorizonClient.memoryConnection(allocate(net.minecraft.network.Connection.class));
+        if (clientConnection == null) {
+            var connection = allocate(net.minecraft.network.Connection.class);
+            // Made without its constructor: the mods' fields on it (Fabric's packet context, which
+            // Female Gender asks for its version as the client joins) are made as at its end.
+            // (UMP, 2026-11-14)
+            HorizonHooks.initFields(connection);
+            clientConnection = HorizonClient.memoryConnection(connection);
+        }
         return clientConnection;
     }
 
@@ -545,7 +557,26 @@ public final class HorizonServer {
                 l -> l.onLevelLoad(server, level));
     }
 
+    /**
+     * One level made at a time, whichever thread asks: the far terrain's noise thread makes the
+     * dimension's level while the server thread makes another (a ConcurrentModificationException
+     * left the mirror without levels; every tick then failed). Reentrant: a level's setup may ask
+     * for another. (UMP, 2026-11-12)
+     */
     private static ServerLevel makeLevel(ResourceKey<Level> key) {
+        synchronized (LEVELS) {
+            return makeLevelLocked(key);
+        }
+    }
+
+    /** The levels made so far, a copy taken under makeLevel's lock. */
+    private static List<ServerLevel> levelsNow() {
+        synchronized (LEVELS) {
+            return new ArrayList<>(LEVELS.values());
+        }
+    }
+
+    private static ServerLevel makeLevelLocked(ResourceKey<Level> key) {
         return LEVELS.computeIfAbsent(key, k -> {
             ServerLevel level = allocate(ServerLevel.class);
             LevelAccess access = (LevelAccess) level;
@@ -637,6 +668,35 @@ public final class HorizonServer {
                         Natives.log("Java mods: a level has no environment attributes: " + e);
                     }
                 });
+                // Its structure manager, which a level the mods generate gets with its generation
+                // (HorizonWorldgen.readyLevel). A level Horizon generates had none, and every mod
+                // asking it where a structure is (Lithostitched's tick, Incendium's location
+                // predicates) failed each tick: one over a check that finds no structures (Horizon
+                // places them there; none are in the mirror's chunks). (UMP, 2026-11-12)
+                try {
+                    java.lang.reflect.Field manager = ServerLevel.class.getDeclaredField("structureManager");
+                    manager.setAccessible(true);
+                    if (manager.get(level) == null && server != null && server.getWorldGenSettings() != null) {
+                        net.minecraft.world.level.chunk.storage.ChunkScanAccess none =
+                                (pos, visitor) -> java.util.concurrent.CompletableFuture.completedFuture(null);
+                        var generator = HorizonServer.generator(level);
+                        if (generator != null) {
+                            var settings = generator instanceof net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator noise
+                                    ? noise.generatorSettings().value()
+                                    : registries.lookupOrThrow(Registries.NOISE_SETTINGS)
+                                            .getOrThrow(net.minecraft.world.level.levelgen.NoiseGeneratorSettings.OVERWORLD).value();
+                            var random = net.minecraft.world.level.levelgen.RandomState.create(
+                                    registries.lookupOrThrow(Registries.NOISE), seed, settings);
+                            var check = new net.minecraft.world.level.levelgen.structure.StructureCheck(none, registries,
+                                    server.getStructureTemplateManager(), k, generator, random,
+                                    level, generator.getBiomeSource(), seed, server.getFixerUpper());
+                            manager.set(level, new net.minecraft.world.level.StructureManager(level,
+                                    server.getWorldGenSettings().options(), check));
+                        }
+                    }
+                } catch (ReflectiveOperationException | RuntimeException e) {
+                    Natives.log("Java mods: a level has no structure manager: " + e);
+                }
             }
             return level;
         });
@@ -886,6 +946,50 @@ public final class HorizonServer {
         return HorizonFunctions.ready();
     }
 
+    /** The headless client's first frame now, on its own thread (HorizonClient.startAtTitle). */
+    public static void clientStartAtTitle() {
+        HorizonClient.startAtTitle();
+    }
+
+    private static boolean starting;
+
+    /**
+     * Fabric's SERVER_STARTING, once: from the first tick, or earlier when the mods' worldgen
+     * starts first (Horizon generates the spawn before its server ticks). Mods load their server
+     * configs there (Forge Config API Port: Lost Cities' profiles) and their features read them
+     * while generating. (UMP, 2026-11-11)
+     */
+    static synchronized void serverStarting(MinecraftServer server) {
+        if (starting || server == null) return;
+        starting = true;
+        fireEach("ServerLifecycleEvents.SERVER_STARTING", ServerLifecycleEvents.SERVER_STARTING, l -> l.onServerStarting(server));
+    }
+
+    private static volatile boolean serverConfigs;
+
+    /**
+     * NeoForge-style server configs (Forge Config API Port's ConfigTracker) with their defaults,
+     * once, if nothing loaded them yet: what a server's start does before generation. Reflective:
+     * nothing when no mod brings the tracker. The real files load at SERVER_STARTING as usual.
+     */
+    static void defaultServerConfigs() {
+        if (serverConfigs) return;
+        synchronized (HorizonServer.class) {
+            if (serverConfigs) return;
+            serverConfigs = true;
+            try {
+                Class<?> tracker = Class.forName("net.neoforged.fml.config.ConfigTracker", true, HorizonServer.class.getClassLoader());
+                Object instance = tracker.getField("INSTANCE").get(null);
+                tracker.getMethod("loadDefaultServerConfigs").invoke(instance);
+                Natives.log("Java mods: server configs' defaults loaded before generation (mods read them while generating)");
+            } catch (ClassNotFoundException e) {
+                // No mod uses them.
+            } catch (Throwable t) {
+                Natives.log("Java mods: server configs' defaults not loaded: " + t);
+            }
+        }
+    }
+
     public static boolean worldgenStart(String dimension, long seed, boolean structures, String world,
             String[] horizonCannot) {
         Thread.currentThread().setContextClassLoader(HorizonServer.class.getClassLoader());
@@ -909,6 +1013,10 @@ public final class HorizonServer {
 
     public static String[] worldgenLodMaterials(String dimension) {
         return HorizonWorldgen.lodMaterials(dimension);
+    }
+
+    public static String[] worldgenLodFoliage(String dimension) {
+        return HorizonWorldgen.lodFoliage(dimension);
     }
 
     public static String worldgenLodNoise(String dimension, String dir) {
@@ -1073,7 +1181,7 @@ public final class HorizonServer {
 
     /** The mirrored levels (one a dimension Horizon has). */
     public static java.util.List<ServerLevel> levels() {
-        return new ArrayList<>(LEVELS.values());
+        return levelsNow();
     }
 
     /** Player {@code i} of a tick's arrays, mirrored as Horizon gives it (made the first time). */
@@ -1190,7 +1298,7 @@ public final class HorizonServer {
                 PLAYERS.add(player);
                 BY_UUID.put(player.getUUID(), player);
             }
-            for (ServerLevel level : LEVELS.values()) LEVEL_PLAYERS.computeIfAbsent(level, l -> {
+            for (ServerLevel level : levelsNow()) LEVEL_PLAYERS.computeIfAbsent(level, l -> {
                 List<ServerPlayer> list = new ArrayList<>();
                 ((ServerLevelAccess) l).horizon$setPlayers(list);
                 return list;
@@ -1430,7 +1538,11 @@ public final class HorizonServer {
             if (client && !HorizonDeviceMods.runs(handler.getClass())) continue;
             String name = handler.getClass().getName();
             int lambda = name.indexOf("$$");
+            long began = System.nanoTime();
             fire(event + " [" + (lambda > 0 ? name.substring(0, lambda) : name) + "]", () -> call.accept((T) handler));
+            // A slow one, named: the world's start runs these one after another on the server thread.
+            long took = (System.nanoTime() - began) / 1_000_000;
+            if (took >= 300) Natives.log("Java mods: " + event + " took " + took + " ms in " + (lambda > 0 ? name.substring(0, lambda) : name));
         }
     }
 
@@ -1574,7 +1686,7 @@ public final class HorizonServer {
             // The constructor's hooks (biome modifications) come before the server starts, as
             // in vanilla, even when no dimension's generation has asked for them yet.
             HorizonWorldgen.readyBeforeTicks(seed);
-            fireEach("ServerLifecycleEvents.SERVER_STARTING", ServerLifecycleEvents.SERVER_STARTING, l -> l.onServerStarting(server));
+            serverStarting(server);
             // MinecraftServer.loadLevel (runServer's initServer): the levels exist at its end.
             hook(server, MinecraftServer.class, "loadLevel", "()V", "HEAD", NO_ARGUMENTS);
             for (String dimension : levelIds()) {
@@ -1582,10 +1694,21 @@ public final class HorizonServer {
             }
             // MinecraftServer.createLevels: Fabric's LOAD for each (a level made before
             // this first tick too); later levels hear it as they are made (level()).
-            for (ServerLevel made : new ArrayList<>(LEVELS.values())) levelLoaded(made);
+            for (ServerLevel made : levelsNow()) levelLoaded(made);
             hook(server, MinecraftServer.class, "loadLevel", "()V", "RETURN", NO_ARGUMENTS);
             hook(server, MinecraftServer.class, "loadLevel", "()V", "TAIL", NO_ARGUMENTS);
-            fireEach("ServerLifecycleEvents.SERVER_STARTED", ServerLifecycleEvents.SERVER_STARTED, l -> l.onServerStarted(server));
+            // The world spawn a started server has (its command source runs at it: Spawn Animations
+        // sends its config as a command at SERVER_STARTED and got a null spawn). (UMP, 2026-11-11)
+        try {
+            java.lang.reflect.Field respawn = MinecraftServer.class.getDeclaredField("effectiveRespawnData");
+            respawn.setAccessible(true);
+            if (respawn.get(server) == null && server.getWorldData() != null) {
+                respawn.set(server, server.getWorldData().overworldData().getRespawnData());
+            }
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            // Not there to give: a mod using it says so.
+        }
+        fireEach("ServerLifecycleEvents.SERVER_STARTED", ServerLifecycleEvents.SERVER_STARTED, l -> l.onServerStarted(server));
         }
         // MinecraftServer.tickServer's head (Fabric's START_SERVER_TICK is its own injection there).
         Object[] haveTime = {(java.util.function.BooleanSupplier) () -> true};
@@ -1599,7 +1722,7 @@ public final class HorizonServer {
         // Their held uses of mods' items (LivingEntity.tick's updatingUsingItem: sandpaper).
         for (ServerPlayer p : BY_UUID.values()) tickUse(p);
         fireEach("ServerTickEvents.START_SERVER_TICK", ServerTickEvents.START_SERVER_TICK, l -> l.onStartTick(server));
-        for (ServerLevel level : new ArrayList<>(LEVELS.values())) {
+        for (ServerLevel level : levelsNow()) {
             fireEach("ServerTickEvents.START_LEVEL_TICK", ServerTickEvents.START_LEVEL_TICK, l -> l.onStartTick(level));
             hook(level, ServerLevel.class, "tick", TICK_SERVER, "HEAD", haveTime);
         }
@@ -1708,7 +1831,7 @@ public final class HorizonServer {
             }
         }
         // Each level's players, as its own list (vanilla's code reads level.players()).
-        for (ServerLevel level : LEVELS.values()) LEVEL_PLAYERS.computeIfAbsent(level, l -> {
+        for (ServerLevel level : levelsNow()) LEVEL_PLAYERS.computeIfAbsent(level, l -> {
             List<ServerPlayer> list = new ArrayList<>();
             ((ServerLevelAccess) l).horizon$setPlayers(list);
             return list;
@@ -1721,7 +1844,7 @@ public final class HorizonServer {
         }
 
         phase = HorizonProfile.add("players and events", phase);
-        for (ServerLevel level : new ArrayList<>(LEVELS.values())) {
+        for (ServerLevel level : levelsNow()) {
             hook(level, ServerLevel.class, "tick", TICK_SERVER, "RETURN", haveTime);
             hook(level, ServerLevel.class, "tick", TICK_SERVER, "TAIL", haveTime);
             fireEach("ServerTickEvents.END_LEVEL_TICK", ServerTickEvents.END_LEVEL_TICK, l -> l.onEndTick(level));
@@ -1749,7 +1872,7 @@ public final class HorizonServer {
         }
         phase = HorizonProfile.add("player tick hooks", phase);
         // Mod blocks' scheduled ticks and block entities, as their levels' ticks run them.
-        for (ServerLevel level : new ArrayList<>(LEVELS.values())) {
+        for (ServerLevel level : levelsNow()) {
             if (level.getBlockTicks() instanceof HorizonTicks<?> ticks) ticks.run(level);
             // The mods' fluids flow here (HorizonTicks: their scheduled fluid ticks).
             if (level.getFluidTicks() instanceof HorizonTicks<?> ticks) ticks.run(level);
@@ -1762,7 +1885,7 @@ public final class HorizonServer {
         playerMotionsAfter();
         phase = HorizonProfile.add("block entities", phase);
         HorizonChunkLoads.tick();
-        HorizonTickets.tick(new ArrayList<>(LEVELS.values()));
+        HorizonTickets.tick(levelsNow());
         HorizonSavedData.tick();
         HorizonDataFixer.check();
         phase = HorizonProfile.add("tickets, saved data", phase);

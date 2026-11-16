@@ -11,6 +11,15 @@ use std::path::{Path, PathBuf};
 /// Fabric ids of mods that replace the renderer.
 pub const RENDERERS: [&str; 5] = ["sodium", "iris", "canvas", "nvidium", "vulkanmod"];
 
+/// Fabric ids of performance-only mods: they make vanilla Java Minecraft faster without changing what
+/// it does. Horizon is its own (Rust) engine, so their patches have nothing to speed up and only
+/// risk failing; they are left out like the renderers. (UMP, 2026-11-10.)
+pub const PERFORMANCE: [&str; 18] = [
+    "lithium", "ferritecore", "c2me", "krypton", "moreculling", "modernfix", "scalablelux", "noisium",
+    "vmp", "immediatelyfast", "entityculling", "dynamic_fps", "lazydfu", "starlight",
+    "enhancedblockentities", "memoryleakfix", "cullleaves", "badoptimizations",
+];
+
 /// Mods Fabric loads that only partly work in Horizon, with the line players read at their
 /// join (told as the left-out ones are).
 pub const PARTIAL: [(&str, &str); 1] = [(
@@ -36,12 +45,18 @@ pub struct LeftOut {
     pub name: String,
     /// The renderer mod it needs; None for a renderer itself.
     pub needs: Option<String>,
+    /// A performance mod (or one needing only performance mods), not a renderer.
+    pub performance: bool,
 }
 
 impl LeftOut {
     /// The line players read: "Sodium isn't needed in Horizon: Horizon has its own renderer".
     pub fn line(&self) -> String {
         match &self.needs {
+            None if self.performance => format!(
+                "{} isn't needed in Horizon: Horizon's own engine is already fast (left out)",
+                self.name
+            ),
             None => format!(
                 "{} isn't needed in Horizon: Horizon has its own renderer (left out)",
                 self.name
@@ -103,11 +118,15 @@ pub fn split(jars: &[PathBuf]) -> (Vec<PathBuf>, Vec<LeftOut>) {
 
 fn split_infos(jars: &[PathBuf], infos: &[Info]) -> (Vec<PathBuf>, Vec<LeftOut>) {
     let mut gone: BTreeSet<String> = BTreeSet::new();
+    let mut perf_gone: BTreeSet<String> = BTreeSet::new();
     let mut needs: Vec<Option<Option<String>>> = vec![None; jars.len()];
     for (i, info) in infos.iter().enumerate() {
-        if let Some(id) = info.id.as_deref().filter(|id| RENDERERS.contains(id)) {
+        if let Some(id) = info.id.as_deref().filter(|id| RENDERERS.contains(id) || PERFORMANCE.contains(id)) {
             needs[i] = Some(None);
             gone.insert(id.to_string());
+            if PERFORMANCE.contains(&id) {
+                perf_gone.insert(id.to_string());
+            }
         }
     }
     // What needs a left-out mod goes too, and what needs that.
@@ -141,6 +160,10 @@ fn split_infos(jars: &[PathBuf], infos: &[Info]) -> (Vec<PathBuf>, Vec<LeftOut>)
                     .clone()
                     .or_else(|| info.id.clone())
                     .unwrap_or_default(),
+                performance: match &needs {
+                    None => info.id.as_deref().is_some_and(|id| perf_gone.contains(id)),
+                    Some(dep) => perf_gone.contains(dep),
+                },
                 needs,
             }),
         }
@@ -186,6 +209,23 @@ mod tests {
                 ("Sodium Extra", Some("sodium".into())),
                 ("Iris", None)
             ]
+        );
+    }
+
+    #[test]
+    fn performance_mods_are_left_out_with_their_own_line() {
+        let jars: Vec<PathBuf> = ["fd.jar", "lith.jar", "fc.jar"].iter().map(PathBuf::from).collect();
+        let infos = vec![
+            info("farmersdelight", "Farmer's Delight", &[]),
+            info("lithium", "Lithium", &[]),
+            info("ferritecore", "FerriteCore", &[]),
+        ];
+        let (kept, left) = split_infos(&jars, &infos);
+        assert_eq!(kept, [PathBuf::from("fd.jar")]);
+        assert!(left.iter().all(|l| l.performance));
+        assert_eq!(
+            left[0].line(),
+            "Lithium isn't needed in Horizon: Horizon's own engine is already fast (left out)"
         );
     }
 

@@ -48,6 +48,14 @@ public final class FabricBoot {
         HorizonGameProvider.version = version;
         HorizonGameProvider.gameJar = Paths.get(gameJar).toAbsolutePath();
         HorizonGameProvider.gameDir = Paths.get(gameDir).toAbsolutePath();
+        // A vanilla game folder always has mods/ (a launcher makes it): mods read their add-on
+        // packs from there (Yuushya's addons) and fail to start when it's missing. Horizon keeps
+        // Java mods in mods-java/, so an empty mods/ is made beside it. (UMP, 2026-11-12)
+        try {
+            java.nio.file.Files.createDirectories(HorizonGameProvider.gameDir.resolve("mods"));
+        } catch (java.io.IOException | RuntimeException e) {
+            // A read-only game folder: mods that need it say so themselves.
+        }
         List<Path> libs = new ArrayList<>();
         for (String library : libraries) libs.add(Paths.get(library).toAbsolutePath());
         HorizonGameProvider.libraries = libs;
@@ -59,6 +67,8 @@ public final class FabricBoot {
         }
         HorizonGameProvider.parentClassPath = parent;
 
+        // Knot's class lookups through a package index (HorizonKnotIndex), before it makes its loader.
+        HorizonKnotIndex.install();
         Knot knot = new Knot(env);
         gameLoader = knot.init(new String[0]);
         // Mods' log lines into Horizon's log from here on (the platform's HorizonLog).
@@ -69,6 +79,12 @@ public final class FabricBoot {
         }
         FabricLoaderImpl loader = FabricLoaderImpl.INSTANCE;
         bootstrapGame();
+        // The updated structure templates read ahead while the mods start (HorizonTemplateCache).
+        try {
+            Class.forName("dev.horizonlab.platform.HorizonTemplateCache", true, gameLoader).getMethod("preload").invoke(null);
+        } catch (ReflectiveOperationException | LinkageError e) {
+            // No platform mod, or not yet loadable: read when asked.
+        }
         loader.prepareModInit(HorizonGameProvider.gameDir, null);
         if (env == EnvType.CLIENT) {
             // Horizon's headless client, which mods' code reaches (Minecraft.getInstance()): made
@@ -83,7 +99,7 @@ public final class FabricBoot {
             }
         }
         try {
-            loader.invokeEntrypoints("main", ModInitializer.class, ModInitializer::onInitialize);
+            timedEntrypoints(loader, "main", ModInitializer.class, ModInitializer::onInitialize);
         } catch (RuntimeException e) {
             // Fabric stops every mod for one that fails here: say where, then give up as it does.
             Throwable root = e;
@@ -98,11 +114,16 @@ public final class FabricBoot {
             }
             throw e;
         }
+        try {
+            Class.forName("dev.horizonlab.platform.HorizonShapeMemo", true, gameLoader).getMethod("report").invoke(null);
+        } catch (ReflectiveOperationException e) {
+            // No platform mod.
+        }
         if (env == EnvType.CLIENT) {
             // Every client entrypoint runs, then Fabric throws what failed: a mod whose client
             // code needs more of a client than the headless one has loses that, not the rest.
             try {
-                loader.invokeEntrypoints("client", ClientModInitializer.class, ClientModInitializer::onInitializeClient);
+                timedEntrypoints(loader, "client", ClientModInitializer.class, ClientModInitializer::onInitializeClient);
             } catch (RuntimeException e) {
                 Throwable root = e;
                 while (root.getCause() != null && root.getCause() != root) root = root.getCause();
@@ -116,6 +137,15 @@ public final class FabricBoot {
                     while (cause.getCause() != null && cause.getCause() != cause) cause = cause.getCause();
                     Natives.log("  and: " + other.getMessage() + ", caused by " + cause);
                 }
+                // Kept for the reason a later failure gives: a mod whose client start failed half way
+                // (registered part of its content) can make the data load fail with a message naming
+                // none of them (Paladin's Furniture beside The Graveyard: "Unbound tags"). (UMP, 2026-11-13)
+                java.util.List<String> ids = new java.util.ArrayList<>();
+                for (Throwable t : prepend(e, e.getSuppressed())) {
+                    var m = java.util.regex.Pattern.compile("provided by '([^']+)'").matcher(String.valueOf(t.getMessage()));
+                    if (m.find()) ids.add(m.group(1));
+                }
+                clientFailures = String.join(", ", ids);
             }
             try {
                 Class<?> client = Class.forName("dev.horizonlab.platform.HorizonClient", true, gameLoader);
@@ -194,8 +224,49 @@ public final class FabricBoot {
     }
 
     /** A game or mod class, loaded and initialized by Knot, so Mixins apply to it. */
+    /** The mods whose client entrypoint failed, for a later failure's message ("" when none). */
+    public static volatile String clientFailures = "";
+
+    private static Throwable[] prepend(Throwable first, Throwable[] rest) {
+        Throwable[] all = new Throwable[rest.length + 1];
+        all[0] = first;
+        System.arraycopy(rest, 0, all, 1, rest.length);
+        return all;
+    }
+
     public static Class<?> gameClass(String name) throws ClassNotFoundException {
         if (gameLoader == null) throw new IllegalStateException("Fabric Loader is not started");
         return Class.forName(name.replace('/', '.'), true, gameLoader);
+    }
+
+    /**
+     * Fabric's invokeEntrypoints, timing each mod's (UMP, 2026-11-11): with HORIZON_JAVA_INIT_TIMES set, or always
+     * for the slow ones (over 500 ms), one line each, so a slow start names the mods it waits for. Failures are
+     * collected and thrown at the end as Fabric's own does, so one mod's failure doesn't skip the rest.
+     */
+    private static <T> void timedEntrypoints(FabricLoaderImpl loader, String key, Class<T> type,
+                                             java.util.function.Consumer<? super T> invoker) {
+        boolean all = System.getenv("HORIZON_JAVA_INIT_TIMES") != null;
+        RuntimeException failed = null;
+        java.util.List<String> slow = new java.util.ArrayList<>();
+        long total = System.nanoTime();
+        for (var container : loader.getEntrypointContainers(key, type)) {
+            long started = System.nanoTime();
+            try {
+                invoker.accept(container.getEntrypoint());
+            } catch (Throwable t) {
+                RuntimeException e = new RuntimeException("Could not execute entrypoint stage '" + key
+                        + "' due to errors, provided by '" + container.getProvider().getMetadata().getId() + "'", t);
+                if (failed == null) failed = e;
+                else failed.addSuppressed(e);
+            }
+            long ms = (System.nanoTime() - started) / 1_000_000;
+            if (all || ms >= 500) slow.add(container.getProvider().getMetadata().getId() + " " + ms + " ms");
+        }
+        if (!slow.isEmpty() || all) {
+            Natives.log("Java mods: '" + key + "' entrypoints took " + (System.nanoTime() - total) / 1_000_000
+                    + " ms" + (slow.isEmpty() ? "" : "; slowest: " + String.join(", ", slow)));
+        }
+        if (failed != null) throw failed;
     }
 }

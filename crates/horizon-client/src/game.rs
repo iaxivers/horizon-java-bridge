@@ -7948,7 +7948,8 @@ impl Game<'_> {
         self.tick_command_extras();
         self.native_tick();
         self.tell_native_now();
-        self.tick_java_server();
+        // Its own span in the slow-tick line (HORIZON_SPIKES), with the Java mods' share.
+        horizon_client::spans::time("tick_java", || self.tick_java_server());
         self.tick_world(running)
     }
     /// What the tick runs after the local player's own update: effects, the
@@ -19295,6 +19296,11 @@ impl Game<'_> {
             }
             return;
         }
+        // Idle at the title, the Java mods' start over: their client's first frame now, not in the
+        // world's join (java_mods::client_start_at_title).
+        if self.title.is_some() && self.pending_entry.is_none() && self.rest_loader.is_none() {
+            java_mods::client_start_at_title();
+        }
         if let Err(error) = horizon_client::spans::time("world_entry", || self.resume_world_entry())
         {
             self.error = Some(error);
@@ -20118,6 +20124,7 @@ impl Game<'_> {
             on_world_screens,
             &self.options.resources,
             self.pack.assets.registry,
+            self.res.biomes(),
         );
         if std::mem::take(&mut self.pending_pack_reload) {
             self.reload_packs();
@@ -20752,20 +20759,43 @@ fn gameplay_tables(
     progress: &Progress,
 ) -> std::result::Result<GameplayTables, String> {
     let facts_step = startup::step("core.block_facts");
-    // Read whole, then parsed from the buffer: `serde_json::from_reader`
-    // pulls through a `BufReader` and is measurably slower on a file this
-    // size than one read plus `from_slice`, which is how `BlockFacts` next
-    // door already reads its own. Same value either way.
-    let behaviour_bytes =
-        std::fs::read(root.join("block-behaviours.json")).map_err(|e| e.to_string())?;
-    let behaviour_json: serde_json::Value =
-        serde_json::from_slice(&behaviour_bytes).map_err(|e| e.to_string())?;
-    drop(behaviour_bytes);
-    let (facts, gameplay_projection) =
-        BlockFacts::load_with_projection(root, assets.registry, &behaviour_json, parallel)
-            .map_err(|e| e.to_string())?;
-    // Read again only if the level behaviours' snapshot misses (`load_world_rest`).
-    drop(behaviour_json);
+    // The decoded facts from the game's cache when they were made from these files: decoding the
+    // JSON took 13 s of each start with 184 mods (UMP). (UMP, 2026-11-14)
+    let cache = std::env::current_dir().unwrap_or_default().join(".horizon-cache");
+    let cached = BlockFacts::load_snapshot(&cache, root, assets.registry);
+    // HORIZON_FACTS_SNAPSHOT_CHECK=1: decode the JSON too and say whether they match.
+    let check = std::env::var_os("HORIZON_FACTS_SNAPSHOT_CHECK").is_some();
+    let (facts, gameplay_projection) = if let Some(cached) = cached.filter(|_| !check) {
+        cached
+    } else {
+        // Read whole, then parsed from the buffer: `serde_json::from_reader`
+        // pulls through a `BufReader` and is measurably slower on a file this
+        // size than one read plus `from_slice`, which is how `BlockFacts` next
+        // door already reads its own. Same value either way.
+        let behaviour_bytes =
+            std::fs::read(root.join("block-behaviours.json")).map_err(|e| e.to_string())?;
+        let behaviour_json: serde_json::Value =
+            serde_json::from_slice(&behaviour_bytes).map_err(|e| e.to_string())?;
+        drop(behaviour_bytes);
+        let (facts, projection) =
+            BlockFacts::load_with_projection(root, assets.registry, &behaviour_json, parallel)
+                .map_err(|e| e.to_string())?;
+        // Read again only if the level behaviours' snapshot misses (`load_world_rest`).
+        drop(behaviour_json);
+        if check {
+            let restored = BlockFacts::load_snapshot(&cache, root, assets.registry);
+            log::info!(
+                "Horizon: block facts snapshot check: {}",
+                match &restored {
+                    Some((r, _)) if r.same_as(&facts) => "the same as the JSON",
+                    Some(_) => "DIFFERENT from the JSON",
+                    None => "no snapshot",
+                }
+            );
+        }
+        facts.store_snapshot(&projection, &cache, root, assets.registry);
+        (facts, projection)
+    };
     horizon_client::block_contact::set_mod_blocks(
         facts
             .states
@@ -22263,6 +22293,12 @@ pub fn run_with() -> Result<()> {
     // Before any worker starts: on Linux they go behind the server thread
     // and the render thread.
     horizon_threads::put_helpers_behind();
+    // Java mods' world generation and threads beside the worker pools: two cores kept for the
+    // frame and the tick (horizon_threads::spare_cores).
+    #[cfg(feature = "java-mods")]
+    if !java_mods::mod_jars().1.is_empty() {
+        horizon_threads::spare_cores(2);
+    }
     if options.execution_role.is_client() {
         // The render thread, like the server thread, ahead of the workers on
         // macOS and Windows. While terrain loads, the workers

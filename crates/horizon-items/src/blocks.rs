@@ -1,6 +1,7 @@
 //! Per-state gameplay facts exported from vanilla's own block-state accessors
 //! (`gameplay-facts.json`), indexed by registry state ID.
 mod decode;
+mod snapshot;
 use crate::Result;
 use horizon_world::{
     level::{Behaviours, GameplayStateSource},
@@ -267,6 +268,30 @@ impl BlockFacts {
             root.join("block-behaviours.json"),
         )?))?;
         Self::load_with_behaviours(root, registry, &behaviours)
+    }
+
+    /// The block facts and gameplay projection from the snapshot in `cache` when it was made
+    /// from `root`'s files for this registry by this build ([`snapshot`]); None: decode the JSON
+    /// ([`Self::load_with_projection`]) and [`Self::store_snapshot`].
+    pub fn load_snapshot(
+        cache: &Path,
+        root: &Path,
+        registry: &BlockRegistry,
+    ) -> Option<(Self, Vec<GameplayProjection>)> {
+        snapshot::load(cache, root, registry)
+    }
+    /// Whether `other` holds the same facts (UMP's check that a snapshot restores what the JSON gives).
+    pub fn same_as(&self, other: &Self) -> bool {
+        snapshot::same(self, other)
+    }
+    pub fn store_snapshot(
+        &self,
+        projection: &[GameplayProjection],
+        cache: &Path,
+        root: &Path,
+        registry: &BlockRegistry,
+    ) {
+        snapshot::store(cache, root, registry, self, projection);
     }
 
     /// Decode state facts once, retaining only the small owned fields needed later.
